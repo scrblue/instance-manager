@@ -1,0 +1,46 @@
+[package]
+name = "clustered_instance_manager"
+version = "0.1.0"
+authors = ["Daniel Lyne <DLyne@pm.me>"]
+edition = "2018"
+
+[dependencies]
+
+# Error handling
+anyhow = "1.0.41"
+
+# Serialization
+bincode = "1.2.1"
+ron = "0.6.0"
+serde = { version = "1.0", features = ["derive"] }
+
+# Logging
+tracing = "0.1.26"
+tracing-subscriber = "0.2.18"
+tracing-futures = { version = "0.2.5", features = ["tokio"] }
+tracing-log = "0.1.2"
+tracing-opentelemetry = "0.12.0"
+
+# Async
+futures = "0.3.14"
+rustls = "0.19.1"
+tokio = { version = "1.5.0", features = ["full"] }
+
+# Networking
+webpki = "0.21.0"
+tokio-rustls = "0.22.0"
+# Internal lib for abstracting TLS streams a bit
+# tokio-tls = { git = "https://gitlab.com/puzzle-parsecs/util/tokio-tls.git" }
+tokio-tls = { path = "../util/tokio-tls/" }
+
+# Clustering
+async-raft = "0.6.1"
+
+# Database
+rocksdb = "0.16.0"
+indradb-lib = { version = "2.1.0", features = ["rocksdb-datastore"] }
+
+[dependencies.common_model]
+path = "../common_model/"
+default-features = false
+features = ["instance_manager"]

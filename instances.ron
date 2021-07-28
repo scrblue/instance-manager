@@ -1,0 +1,47 @@
+#![enable(implicit_some)]
+{
+	"instance_manager": Instance(
+		start_program: "instance_manager",
+		install_method: Git(
+			git_url: "https://test.url/instance_manager",
+			version: Branch("test"),
+		),
+	)
+
+	"console": Instance(
+		start_program: "console",
+		with_args: {
+			"listen_addr": "127.0.0.1:2002"
+		}
+		install_method: Git(
+			git_url: "https://test.url/instance_manager",
+			version: Branch("test"),
+		),
+	)
+
+	"chat": Instance(
+		start_program: "chat_server",
+		install_method: Git(
+			git_url: "https://test.url/instance_manager",
+			version: Branch("test"),
+		),
+	)
+	
+	"game_instance": Category(
+		instances: {
+			"system": Instance(...),
+			"planet": Instance(...),
+			"station": Instance(...),
+			"engagement": Instance(...),
+			"ship": Instance(...),
+			"puzzle_instance": Category(
+				instances: {
+					"combat_piloting": Instance(...),
+					"engines": Instance(...),
+					"shields": Instance(...),
+					"life_support": Instance(...),
+				},
+			),
+		},
+	),
+}

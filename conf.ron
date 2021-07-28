@@ -1,0 +1,22 @@
+#![enable(implicit_some)]
+{
+	log_level: "trace",
+
+	// TODO: OpenTelemetry info
+	
+	public_ip: "192.168.122.1",
+	port_bound: 2000,
+	
+
+	server_public_key: "../tls/root/root.der",
+	server_private_key: "../tls/root/root_private.der",
+	server_key_password: "test",
+	
+	instance_store_overrides: {},
+
+	// Core Config
+	root_ca_cert: "../tls/cert_root/cert_root.der",
+	node_ca_cert: "../tls/cert_root/cert_root.der",
+	admin_ca_cert: "../tls/cert_root/cert_root.der",
+	peers: ["192.168.122.1:2000", "192.168.122.1:2001"],
+}
