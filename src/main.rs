@@ -54,10 +54,10 @@ async fn main() -> Result<()> {
     tokio::spawn(io::handle_io(io_s));
 
     // Spawn ConnectionManager
-    let (mut connection_manager_to_main_s, connection_manager_r) =
+    let (connection_manager_to_main_s, mut connection_manager_r) =
         mpsc::channel::<FromConnectionManager>(128);
     let (mut connection_manager_s, main_to_connection_manager_r) =
-        mpsc::channel::<FromConnectionManager>(128);
+        mpsc::channel::<ToConnectionManager>(128);
 
     let listener_socket_addr = SocketAddr::from((local_conf.public_ip, local_conf.port_bound));
 
@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
         .peers
         .iter()
         .filter(|addr| **addr != listener_socket_addr)
+		.map(|addr| *addr)
         .collect::<Vec<_>>();
 
     tokio::spawn(connection_manager::handle_connections(
@@ -96,8 +97,14 @@ async fn main() -> Result<()> {
                     _ => {},
                 }
             }
+
+            msg = connection_manager_r.recv() => {
+				tracing::info!("CM msg: {:?}", msg);
+            }
         }
     }
 
+	connection_manager_s.send(ToConnectionManager::Shutdown).await?;
+	
     Ok(())
 }
