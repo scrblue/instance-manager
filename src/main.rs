@@ -4,21 +4,23 @@ use anyhow::Result;
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpListener,
     sync::mpsc,
 };
-use tokio_rustls::TlsAcceptor;
-use tokio_tls::TlsConnection;
 
 mod configuration;
 mod connection_manager;
 mod io;
 mod messages;
+mod peer_tracker;
 mod tls;
 
 use connection_manager::ConnectionManagerToMain as FromConnectionManager;
 use connection_manager::MainToConnectionManager as ToConnectionManager;
+
 use io::IoToMain as FromIo;
+
+use peer_tracker::MainToPeerTracker as ToPeerTracker;
+use peer_tracker::PeerTrackerToMain as FromPeerTracker;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -53,7 +55,7 @@ async fn main() -> Result<()> {
     // Spawn IO thread
     tokio::spawn(io::handle_io(io_s));
 
-    // Spawn ConnectionManager
+    // Spawn connection managment thread
     let (connection_manager_to_main_s, mut connection_manager_r) =
         mpsc::channel::<FromConnectionManager>(128);
     let (mut connection_manager_s, main_to_connection_manager_r) =
@@ -62,11 +64,11 @@ async fn main() -> Result<()> {
     let listener_socket_addr = SocketAddr::from((local_conf.public_ip, local_conf.port_bound));
 
     // Filter the global list of peers so that the address of this manager is not included
-    let mut peers = core_conf
+    let peers = core_conf
         .peers
         .iter()
         .filter(|addr| **addr != listener_socket_addr)
-		.map(|addr| *addr)
+        .map(|addr| *addr)
         .collect::<Vec<_>>();
 
     tokio::spawn(connection_manager::handle_connections(
@@ -78,10 +80,17 @@ async fn main() -> Result<()> {
         peers,
     ));
 
-    // Spawn RequestManager
+    // Spawn peer tracking thread
+    let (peer_tracker_to_main_s, mut peer_tracker_r) = mpsc::channel::<FromPeerTracker>(128);
+    let (peer_tracker_s, main_to_peer_tracker_r) = mpsc::channel::<ToPeerTracker>(128);
 
-    // Spawn PeerTracker
-    // Spawn InstanceTracker
+    tokio::spawn(peer_tracker::track_peers(
+        peer_tracker_to_main_s,
+        main_to_peer_tracker_r,
+        state.clone(),
+    ));
+
+    // Spawn instance tracking thread
 
     loop {
         tokio::select! {
@@ -99,12 +108,20 @@ async fn main() -> Result<()> {
             }
 
             msg = connection_manager_r.recv() => {
-				tracing::info!("CM msg: {:?}", msg);
+                tracing::info!("CM msg: {:?}", msg);
+            }
+
+            msg = peer_tracker_r.recv() => {
+                tracing::info!("PT msg: {:?}", msg);
             }
         }
     }
 
-	connection_manager_s.send(ToConnectionManager::Shutdown).await?;
-	
+    connection_manager_s
+        .send(ToConnectionManager::Shutdown)
+        .await?;
+
+    peer_tracker_s.send(ToPeerTracker::Shutdown).await?;
+
     Ok(())
 }

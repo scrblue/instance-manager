@@ -47,7 +47,7 @@ pub async fn handle_connections(
 			msg = from_main.recv() => {
 				match msg {
 					Some(FromMain::Shutdown) => {
-    					tracing::info!("Connection manager shutting down gracefully");
+    					tracing::debug!("Connection manager shutting down gracefully");
 						break;
 					},
 

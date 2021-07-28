@@ -29,17 +29,36 @@ pub enum IncomingMessage {
 	RaftRequest(RaftRequest),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ManagerManagerRequest {
     /// For when initiating a connection -- the SocketAddr is the public IP of the peer
     Greeting(SocketAddr),
 
-    AppendEntries(async_raft::raft::AppendEntriesRequest<RaftRequest>),
-    InstallSnapshot(async_raft::raft::InstallSnapshotRequest),
-    RequestVote(async_raft::raft::VoteRequest),
+    AppendEntries {
+		term: u64,
+		leader_id: u64,
+		prev_log_index: u64,
+		prev_log_term: u64,
+		entries: Vec<RaftRequest>,
+		leader_commit: u64,
+    },
+    InstallSnapshot {
+		term: u64,
+		leader_id: u64,
+		last_included_index: u64,
+		offsest: u64,
+		data: Vec<u8>,
+		done: bool,
+    },
+    RequestVote {
+		term: u64,
+		candidate_id: u64,
+		last_log_index: u64,
+		last_log_term: u64,
+    },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum RaftRequest {
     ConsoleNetworkRequest(ConsoleNetworkRequest),
     InstanceNetworkRequest(InstanceNetworkRequest),
