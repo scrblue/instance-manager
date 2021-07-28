@@ -205,6 +205,7 @@ dependencies = [
  "common_model",
  "futures 0.3.15",
  "indradb-lib",
+ "rand 0.8.4",
  "rocksdb 0.16.0",
  "ron",
  "rustls",

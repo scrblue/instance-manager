@@ -81,8 +81,8 @@ async fn main() -> Result<()> {
     ));
 
     // Spawn peer tracking thread
-    let (peer_tracker_to_main_s, mut peer_tracker_r) = mpsc::channel::<FromPeerTracker>(128);
-    let (peer_tracker_s, main_to_peer_tracker_r) = mpsc::channel::<ToPeerTracker>(128);
+    let (mut peer_tracker_to_main_s, mut peer_tracker_r) = mpsc::channel::<FromPeerTracker>(128);
+    let (mut peer_tracker_s, mut main_to_peer_tracker_r) = mpsc::channel::<ToPeerTracker>(128);
 
     tokio::spawn(peer_tracker::track_peers(
         peer_tracker_to_main_s,
@@ -108,7 +108,21 @@ async fn main() -> Result<()> {
             }
 
             msg = connection_manager_r.recv() => {
-                tracing::info!("CM msg: {:?}", msg);
+                match msg {
+                	Some(msg) => tracing::info!("CM msg: {:?}", msg),
+                	None => {
+						tracing::error!("Connection manager channel closed -- restarting");
+                        let (mut peer_tracker_to_main_s, mut peer_tracker_r) = mpsc::channel::<FromPeerTracker>(128);
+                        let (mut peer_tracker_s, mut main_to_peer_tracker_r) = mpsc::channel::<ToPeerTracker>(128);
+
+                        tokio::spawn(peer_tracker::track_peers(
+                            peer_tracker_to_main_s,
+                            main_to_peer_tracker_r,
+                            state.clone(),
+                        ));
+						break;
+                	},
+                }
             }
 
             msg = peer_tracker_r.recv() => {

@@ -23,10 +23,10 @@ use std::{collections::HashMap, net::SocketAddr};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IncomingMessage {
-	ManagerManagerRequest(ManagerManagerRequest),
-	ConsoleManagerRequest(ConsoleManagerRequest),
-	InstanceManagerRequest(InstanceManagerRequest),
-	RaftRequest(RaftRequest),
+    ManagerManagerRequest(ManagerManagerRequest),
+    ConsoleManagerRequest(ConsoleManagerRequest),
+    InstanceManagerRequest(InstanceManagerRequest),
+    RaftRequest(RaftRequest),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -35,26 +35,26 @@ pub enum ManagerManagerRequest {
     Greeting(SocketAddr),
 
     AppendEntries {
-		term: u64,
-		leader_id: u64,
-		prev_log_index: u64,
-		prev_log_term: u64,
-		entries: Vec<RaftRequest>,
-		leader_commit: u64,
+        term: u64,
+        leader_id: u64,
+        prev_log_index: u64,
+        prev_log_term: u64,
+        entries: Vec<RaftRequest>,
+        leader_commit: u64,
     },
     InstallSnapshot {
-		term: u64,
-		leader_id: u64,
-		last_included_index: u64,
-		offsest: u64,
-		data: Vec<u8>,
-		done: bool,
+        term: u64,
+        leader_id: u64,
+        last_included_index: u64,
+        offsest: u64,
+        data: Vec<u8>,
+        done: bool,
     },
     RequestVote {
-		term: u64,
-		candidate_id: u64,
-		last_log_index: u64,
-		last_log_term: u64,
+        term: u64,
+        candidate_id: u64,
+        last_log_index: u64,
+        last_log_term: u64,
     },
 }
 

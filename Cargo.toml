@@ -40,6 +40,9 @@ async-raft = "0.6.1"
 rocksdb = "0.16.0"
 indradb-lib = { version = "2.1.0", features = ["rocksdb-datastore"] }
 
+# Other
+rand = "0.8.4"
+
 [dependencies.common_model]
 path = "../common_model/"
 default-features = false
