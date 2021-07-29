@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rand::seq::SliceRandom;
+use rand::{distributions::Uniform, seq::SliceRandom, thread_rng, Rng};
 use rustls::{ClientConfig, ServerConfig};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
@@ -44,6 +44,28 @@ pub async fn handle_connections(
     'outer: loop {
         if form_connections_with.is_empty() {
             tokio::select! {
+                connection = tcp_lisenter.accept() => {
+                     match connection {
+                         Err(e) => {
+                             tracing::error!("Failure accepting connection: {}", e);
+                             continue;
+                         },
+                         Ok((stream, socket)) => {
+                             tracing::info!("Connection from {}", socket);
+
+                             let stream = match acceptor.accept(stream).await {
+                                 Ok(stream) => stream,
+                                 Err(e) => {
+                                     tracing::error!("Error forming TLS stream with incoming connection on {}: {}", socket, e);
+                                     continue;
+                                 }
+                             };
+
+                             let stream = TlsConnection::new(stream);
+
+                         }
+                     }
+                },
                 msg = from_main.recv() => {
                     match msg {
                         Some(FromMain::Shutdown) => {
@@ -61,7 +83,31 @@ pub async fn handle_connections(
                 },
             }
         } else {
+            let wait_interval = Uniform::new_inclusive(75u64, 200u64);
             tokio::select! {
+               connection = tcp_lisenter.accept() => {
+                    match connection {
+                        Err(e) => {
+                            tracing::error!("Failure accepting connection: {}", e);
+                            continue;
+                        },
+                        Ok((stream, socket)) => {
+                            tracing::info!("Connection from {}", socket);
+
+                            let stream = match acceptor.accept(stream).await {
+                                Ok(stream) => stream,
+                                Err(e) => {
+                                    tracing::error!("Error forming TLS stream with incoming connection on {}: {}", socket, e);
+                                    continue;
+                                }
+                            };
+
+                            let stream = TlsConnection::new(stream);
+
+                        }
+                    }
+               },
+
                msg = from_main.recv() => {
                    match msg {
                        Some(FromMain::Shutdown) => {
@@ -78,11 +124,11 @@ pub async fn handle_connections(
                    }
                },
 
-               _ = tokio::time::sleep(Duration::from_millis(100)) => {
+               _ = tokio::time::sleep(Duration::from_millis(thread_rng().sample(wait_interval))) => {
                    // TODO: Error handling
                    let addr = *form_connections_with.choose(&mut rand::thread_rng()).unwrap();
                    let mut connected = false;
-                   'inner: for attempts in 0u8..3u8 {
+                   'inner: for _attempts in 0u8..3u8 {
                        let stream = match TcpStream::connect(addr).await {
                            Ok(stream) => stream,
                            Err(e) => {
@@ -95,7 +141,7 @@ pub async fn handle_connections(
                        let tls_connector = TlsConnector::from(client_config.clone());
                        let stream = match tls_connector.connect(
                            // FIXME: Don't hardcode
-                           webpki::DNSNameRef::try_from_ascii_str("worker.pp.lyne.dev")?,
+                           webpki::DNSNameRef::try_from_ascii_str("root.pp.lyne.dev")?,
                            stream
                        ).await {
                            Ok(stream) => stream,

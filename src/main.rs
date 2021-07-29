@@ -46,9 +46,9 @@ async fn main() -> Result<()> {
     let client_conf = Arc::new(client_conf);
 
     let distributed_conf = Arc::new(
-        indradb::RocksdbDatastore::new("TODO.db", None).map_err(|e| anyhow::anyhow!("{:?}", e))?,
+        indradb::RocksdbDatastore::new(local_conf.shared_conf_db_path, None).map_err(|e| anyhow::anyhow!("{:?}", e))?,
     );
-    let state = Arc::new(indradb::MemoryDatastore::create("TODO.tmp")?);
+    let state = Arc::new(indradb::MemoryDatastore::create(local_conf.cache_file_path)?);
 
     let (mut io_s, mut io_r) = mpsc::channel::<FromIo>(128);
 
