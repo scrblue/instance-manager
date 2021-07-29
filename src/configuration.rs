@@ -21,8 +21,8 @@ pub struct LocalConfig {
 
     pub instance_store_overrides: HashMap<String, InstanceConfOverrides>,
 
-   	pub cache_file_path: PathBuf,
-   	pub shared_conf_db_path: PathBuf,
+    pub cache_file_path: PathBuf,
+    pub shared_conf_db_path: PathBuf,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

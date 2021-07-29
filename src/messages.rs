@@ -21,7 +21,7 @@ use crate::configuration;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum IncomingMessage {
     ManagerManagerRequest(ManagerManagerRequest),
     ConsoleManagerRequest(ConsoleManagerRequest),

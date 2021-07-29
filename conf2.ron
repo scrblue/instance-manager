@@ -5,7 +5,7 @@
 	// TODO: OpenTelemetry info
 	
 	public_ip: "192.168.122.1",
-	port_bound: 2000,
+	port_bound: 2001,
 	
 
 	server_public_key: "../tls/root/root.der",
@@ -14,8 +14,8 @@
 	
 	instance_store_overrides: {},
 	
-	cache_file_path: "./test1",
-	shared_conf_db_path: "./test1.db",
+	cache_file_path: "./test2",
+	shared_conf_db_path: "./test2.db",
 
 	// Core Config
 	root_ca_cert: "../tls/cert_root/cert_root.der",

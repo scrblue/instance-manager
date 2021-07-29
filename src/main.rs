@@ -46,9 +46,12 @@ async fn main() -> Result<()> {
     let client_conf = Arc::new(client_conf);
 
     let distributed_conf = Arc::new(
-        indradb::RocksdbDatastore::new(local_conf.shared_conf_db_path, None).map_err(|e| anyhow::anyhow!("{:?}", e))?,
+        indradb::RocksdbDatastore::new(local_conf.shared_conf_db_path, None)
+            .map_err(|e| anyhow::anyhow!("{:?}", e))?,
     );
-    let state = Arc::new(indradb::MemoryDatastore::create(local_conf.cache_file_path)?);
+    let state = Arc::new(indradb::MemoryDatastore::create(
+        local_conf.cache_file_path,
+    )?);
 
     let (mut io_s, mut io_r) = mpsc::channel::<FromIo>(128);
 
@@ -109,9 +112,9 @@ async fn main() -> Result<()> {
 
             msg = connection_manager_r.recv() => {
                 match msg {
-                	Some(msg) => tracing::info!("CM msg: {:?}", msg),
-                	None => {
-						tracing::error!("Connection manager channel closed -- restarting");
+                    Some(msg) => tracing::info!("CM msg: {:?}", msg),
+                    None => {
+                        tracing::error!("Connection manager channel closed -- restarting");
                         let (mut peer_tracker_to_main_s, mut peer_tracker_r) = mpsc::channel::<FromPeerTracker>(128);
                         let (mut peer_tracker_s, mut main_to_peer_tracker_r) = mpsc::channel::<ToPeerTracker>(128);
 
@@ -120,8 +123,8 @@ async fn main() -> Result<()> {
                             main_to_peer_tracker_r,
                             state.clone(),
                         ));
-						break;
-                	},
+                        break;
+                    },
                 }
             }
 
