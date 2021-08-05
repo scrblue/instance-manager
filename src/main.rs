@@ -1,6 +1,7 @@
 use common_model::{instance_management::ServerHealth, InstancePath};
 
 use anyhow::Result;
+use indradb::{Datastore, Transaction};
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -68,11 +69,19 @@ async fn main() -> Result<()> {
     let listener_socket_addr = SocketAddr::from((local_conf.public_ip, local_conf.port_bound));
 
     // Filter the global list of peers so that the address of this manager is not included
+    let mut self_id = None;
     let peers = core_conf
         .peers
         .iter()
-        .filter(|addr| **addr != listener_socket_addr)
-        .map(|addr| *addr)
+        .filter(|(id, addr)| {
+            if *addr != listener_socket_addr {
+                true
+            } else {
+                self_id = Some(*id);
+                false
+            }
+        })
+        .map(|id_and_addr| *id_and_addr)
         .collect::<Vec<_>>();
 
     tokio::spawn(connection_manager::handle_connections(
@@ -83,6 +92,36 @@ async fn main() -> Result<()> {
         client_conf,
         peers,
     ));
+
+    // Insert self into graph of running instances
+    let transaction = (*state)
+        .transaction()
+        .map_err(|e| anyhow::anyhow!("Error creating Transaction for state: {}", e))?;
+    let self_uuid = transaction
+        .create_vertex_from_type(indradb::Type::new("InstanceManager").unwrap())
+        .unwrap();
+
+    // Then set its instance_id and socket_addr
+    let _ = transaction
+        .set_vertex_properties(
+            indradb::VertexPropertyQuery::new(
+                indradb::SpecificVertexQuery::single(self_uuid).into(),
+                "instance_id",
+            ),
+            &serde_json::Value::Number(
+                serde_json::Number::from_f64(self_id.unwrap() as f64).unwrap(),
+            ),
+        )
+        .unwrap();
+    let _ = transaction
+        .set_vertex_properties(
+            indradb::VertexPropertyQuery::new(
+                indradb::SpecificVertexQuery::single(self_uuid).into(),
+                "socket_addr",
+            ),
+            &serde_json::Value::String(format!("{}", listener_socket_addr)),
+        )
+        .unwrap();
 
     // Spawn peer tracking thread
     let (mut peer_tracker_to_main_s, mut peer_tracker_r) = mpsc::channel::<FromPeerTracker>(128);
@@ -113,8 +152,8 @@ async fn main() -> Result<()> {
 
             msg = connection_manager_r.recv() => {
                 match msg {
-                    Some(FromConnectionManager::ConnectedPeer(id, stream)) => {
-                        peer_tracker_s.send(ToPeerTracker::NewPeer(id, stream));
+                    Some(FromConnectionManager::ConnectedPeer(id, listener_addr, stream)) => {
+                        peer_tracker_s.send(ToPeerTracker::NewPeer(id, listener_addr, stream)).await?;
                     },
                     Some(msg) => tracing::info!("CM msg: {:?}", msg),
                     None => {
@@ -126,7 +165,13 @@ async fn main() -> Result<()> {
             }
 
             msg = peer_tracker_r.recv() => {
-                tracing::info!("PT msg: {:?}", msg);
+                match msg {
+                   Some(msg) => tracing::info!("PT msg: {:?}", msg),
+                   None => {
+                       tracing::error!("Peer tracker channel closed");
+                       break;
+                   }
+                }
             }
         }
     }
@@ -136,6 +181,8 @@ async fn main() -> Result<()> {
         .await?;
 
     peer_tracker_s.send(ToPeerTracker::Shutdown).await?;
+
+    // FIXME: IO shutdown
 
     Ok(())
 }

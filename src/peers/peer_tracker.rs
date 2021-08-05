@@ -15,7 +15,7 @@ use PeerTrackerToMain as ToMain;
 
 #[derive(Debug)]
 pub enum MainToPeerTracker {
-    NewPeer(usize, TlsConnection<TcpStream>),
+    NewPeer(usize, SocketAddr, TlsConnection<TcpStream>),
     Shutdown,
 }
 use MainToPeerTracker as FromMain;
@@ -51,7 +51,7 @@ pub async fn track_peers(
                         break;
                     }
 
-                    Some(FromMain::NewPeer(id, connection)) => {
+                    Some(FromMain::NewPeer(id, socket_addr, connection)) => {
                         let (sender, receiver) = mpsc::channel::<ToConnection>(128);
 
                         match state_handle.transaction() {
@@ -60,6 +60,24 @@ pub async fn track_peers(
                                     indradb::RangeVertexQuery::new().t(indradb::Type::new(
                                         "InstanceManager"
                                     ).unwrap())).unwrap();
+
+                                let existing_instance_manager_ids = transaction.get_vertex_properties(
+                                    indradb::VertexPropertyQuery::new(
+                                        indradb::SpecificVertexQuery::new(
+                                            existing_instance_managers.iter().map(|im| im.id).collect()
+                                        ).into(),
+                                        "instance_id",
+                                    )
+                                ).unwrap();
+
+								// Skip adding this InstanceManager if it already appears in the graph
+								if existing_instance_manager_ids.iter().find(|&existing_id| {
+									existing_id.value == serde_json::Value::Number(
+    									serde_json::Number::from_f64(id as f64).unwrap()
+									)
+								}).is_some() {
+									continue;
+								}
 
                                 let new_instance_manager = indradb::Vertex::new(
                                      indradb::Type::new("InstanceManager"
@@ -73,6 +91,16 @@ pub async fn track_peers(
                                           &serde_json::Value::Number(
                                               serde_json::Number::from_f64(id as f64).unwrap()
                                       ));
+
+                                let _ = transaction.set_vertex_properties(
+                                    indradb::VertexPropertyQuery::new(
+                                        indradb::SpecificVertexQuery::single(
+                                              new_instance_manager.id).into(),
+                                              "socket_addr"),
+                                          &serde_json::Value::String(
+                                              format!("{}", socket_addr)
+                                          )
+                                      );
 
                                 for existing_instance_manager in existing_instance_managers {
                                     let key = indradb::EdgeKey::new(existing_instance_manager.id, indradb::Type::new("peers_with").unwrap(), new_instance_manager.id);
@@ -89,8 +117,6 @@ pub async fn track_peers(
                                 break;
                             },
                         };
-
-                        state_handle.sync().unwrap();
 
                         peer_handles.insert(id, (
                             tokio::spawn(peer_connection::handle_peer_connection(

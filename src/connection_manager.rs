@@ -14,7 +14,7 @@ use tokio_tls::TlsConnection;
 
 #[derive(Debug)]
 pub enum ConnectionManagerToMain {
-    ConnectedPeer(usize, TlsConnection<TcpStream>),
+    ConnectedPeer(usize, SocketAddr, TlsConnection<TcpStream>),
     ConnectedInstance(SocketAddr),
     FailedToConnect(SocketAddr),
 }
@@ -39,7 +39,7 @@ pub async fn handle_connections(
     listener_socket_addr: SocketAddr,
     server_config: Arc<ServerConfig>,
     client_config: Arc<ClientConfig>,
-    initial_connections: Vec<SocketAddr>,
+    initial_connections: Vec<(usize, SocketAddr)>,
 ) -> Result<()> {
     // Start listening
     let tcp_lisenter = TcpListener::bind(listener_socket_addr).await?;
@@ -172,13 +172,14 @@ pub async fn handle_connections(
 #[tracing::instrument(skip(client_config, to_main))]
 async fn initiate_connection(
     listener_socket_addr: SocketAddr,
-    form_connections_with: &mut Vec<SocketAddr>,
+    form_connections_with: &mut Vec<(usize, SocketAddr)>,
     client_config: Arc<ClientConfig>,
     to_main: &mpsc::Sender<ToMain>,
 ) -> Result<()> {
-    let addr = *form_connections_with
+    let (id, addr) = *form_connections_with
         .choose(&mut rand::thread_rng())
         .unwrap();
+
     let mut connected = false;
     for _attempts in 0u8..3u8 {
         let stream = match TcpStream::connect(addr).await {
@@ -216,8 +217,9 @@ async fn initiate_connection(
             .await
             .unwrap();
 
-        // TODO: Negotiate ID
-        to_main.send(ToMain::ConnectedPeer(0, stream)).await?;
+        to_main
+            .send(ToMain::ConnectedPeer(id, addr, stream))
+            .await?;
         tracing::info!("Connected to peer with socket address {}", addr);
         connected = true;
         break;
@@ -225,7 +227,7 @@ async fn initiate_connection(
 
     let index = form_connections_with
         .iter()
-        .position(|&element| element == addr);
+        .position(|&(vec_id, _)| vec_id == id);
     if let Some(index) = index {
         let _ = form_connections_with.remove(index);
     }
@@ -276,7 +278,7 @@ async fn handle_from_main(from_main: Option<FromMain>) -> LoopEnd {
 #[tracing::instrument(skip(to_main))]
 async fn handle_unmanaged_connection(
     msg: Option<Result<(IncomingMessage, TlsConnection<TcpStream>)>>,
-    form_connections_with: &mut Vec<SocketAddr>,
+    form_connections_with: &mut Vec<(usize, SocketAddr)>,
     to_main: &mpsc::Sender<ToMain>,
 ) {
     match msg {
@@ -288,14 +290,37 @@ async fn handle_unmanaged_connection(
                 "Received connection from client peer who listens on {}",
                 addr
             );
-            if let Err(e) = to_main.send(ToMain::ConnectedPeer(0, connection)).await {
-                tracing::error!("Error while notifying main of ConnectedPeer");
-            };
+
+            let mut id = None;
+            let mut listener_socket_addr = None;
 
             let index = form_connections_with
                 .iter()
-                .position(|&element| element == addr);
+                .position(|&(vec_id, element_addr)| {
+                    if element_addr == addr {
+                        id = Some(vec_id);
+                        listener_socket_addr = Some(element_addr);
+                        true
+                    } else {
+                        false
+                    }
+                });
+
             if let Some(index) = index {
+                if let Err(e) = to_main
+                    .send(ToMain::ConnectedPeer(
+                        id.unwrap(),
+                        listener_socket_addr.unwrap(),
+                        connection,
+                    ))
+                    .await
+                {
+                    tracing::error!(
+                        "Error while notifying main of ConnectedPeer with ID {}: {}",
+                        id.unwrap(),
+                        e
+                    );
+                };
                 let _ = form_connections_with.remove(index);
             }
         }
