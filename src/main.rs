@@ -11,7 +11,8 @@ mod configuration;
 mod connection_manager;
 mod io;
 mod messages;
-mod peer_tracker;
+mod peers;
+use peers::peer_tracker;
 mod tls;
 
 use connection_manager::ConnectionManagerToMain as FromConnectionManager;
@@ -112,17 +113,13 @@ async fn main() -> Result<()> {
 
             msg = connection_manager_r.recv() => {
                 match msg {
+                    Some(FromConnectionManager::ConnectedPeer(id, stream)) => {
+                        peer_tracker_s.send(ToPeerTracker::NewPeer(id, stream));
+                    },
                     Some(msg) => tracing::info!("CM msg: {:?}", msg),
                     None => {
-                        tracing::error!("Connection manager channel closed -- restarting");
-                        let (mut peer_tracker_to_main_s, mut peer_tracker_r) = mpsc::channel::<FromPeerTracker>(128);
-                        let (mut peer_tracker_s, mut main_to_peer_tracker_r) = mpsc::channel::<ToPeerTracker>(128);
-
-                        tokio::spawn(peer_tracker::track_peers(
-                            peer_tracker_to_main_s,
-                            main_to_peer_tracker_r,
-                            state.clone(),
-                        ));
+                        // TODO: Restart on failuer
+                        tracing::error!("Connection manager channel closed");
                         break;
                     },
                 }

@@ -83,6 +83,7 @@ pub async fn handle_connections(
 
                     _ = tokio::time::sleep(Duration::from_millis(thread_rng().sample(wait_interval))) => {
                        if let Err(e) = initiate_connection(
+                           listener_socket_addr,
                            &mut form_connections_with,
                            client_config.clone(),
                            &to_main
@@ -112,6 +113,7 @@ pub async fn handle_connections(
 
                     _ = tokio::time::sleep(Duration::from_millis(thread_rng().sample(wait_interval))) => {
                        if let Err(e) = initiate_connection(
+                           listener_socket_addr,
                            &mut form_connections_with,
                            client_config.clone(),
                            &to_main
@@ -169,6 +171,7 @@ pub async fn handle_connections(
 
 #[tracing::instrument(skip(client_config, to_main))]
 async fn initiate_connection(
+    listener_socket_addr: SocketAddr,
     form_connections_with: &mut Vec<SocketAddr>,
     client_config: Arc<ClientConfig>,
     to_main: &mpsc::Sender<ToMain>,
@@ -204,7 +207,14 @@ async fn initiate_connection(
             }
         };
 
-        let stream = TlsConnection::new(stream);
+        let mut stream = TlsConnection::new(stream);
+
+        stream
+            .send_message(&IncomingMessage::ManagerManagerRequest(
+                ManagerManagerRequest::Greeting(listener_socket_addr),
+            ))
+            .await
+            .unwrap();
 
         // TODO: Negotiate ID
         to_main.send(ToMain::ConnectedPeer(0, stream)).await?;
@@ -263,7 +273,7 @@ async fn handle_from_main(from_main: Option<FromMain>) -> LoopEnd {
     }
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip(to_main))]
 async fn handle_unmanaged_connection(
     msg: Option<Result<(IncomingMessage, TlsConnection<TcpStream>)>>,
     form_connections_with: &mut Vec<SocketAddr>,
