@@ -70,14 +70,14 @@ pub async fn track_peers(
                                     )
                                 ).unwrap();
 
-								// Skip adding this InstanceManager if it already appears in the graph
-								if existing_instance_manager_ids.iter().find(|&existing_id| {
-									existing_id.value == serde_json::Value::Number(
-    									serde_json::Number::from_f64(id as f64).unwrap()
-									)
-								}).is_some() {
-									continue;
-								}
+                                // Skip adding this InstanceManager if it already appears in the graph
+                                if existing_instance_manager_ids.iter().find(|&existing_id| {
+                                    existing_id.value == serde_json::Value::Number(
+                                        serde_json::Number::from_f64(id as f64).unwrap()
+                                    )
+                                }).is_some() {
+                                    continue;
+                                }
 
                                 let new_instance_manager = indradb::Vertex::new(
                                      indradb::Type::new("InstanceManager"

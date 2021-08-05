@@ -28,6 +28,7 @@ pub async fn handle_peer_connection(
                     }
                     Err(e) => {
                         tracing::error!("Error receiving message from peer: {}", e);
+                        break;
                     }
                 }
             },

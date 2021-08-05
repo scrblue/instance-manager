@@ -47,6 +47,7 @@ pub async fn handle_connections(
 
     // Add initial_connections to randomized connection queue
     let mut form_connections_with = initial_connections;
+    let mut await_connections_from = Vec::new();
 
     // The connections that have yet to be sent to a tracker -- waiting on an initial message
     let mut unmanaged_connections = FuturesUnordered::new();
@@ -71,7 +72,7 @@ pub async fn handle_connections(
                     },
 
                     result = unmanaged_connections.next() => {
-                        handle_unmanaged_connection(result, &mut form_connections_with, &to_main).await;
+                        handle_unmanaged_connection(result, &mut form_connections_with, &mut await_connections_from, &to_main).await;
                     }
 
                     connection = tcp_lisenter.accept() => {
@@ -85,6 +86,7 @@ pub async fn handle_connections(
                        if let Err(e) = initiate_connection(
                            listener_socket_addr,
                            &mut form_connections_with,
+                           &mut await_connections_from,
                            client_config.clone(),
                            &to_main
                        ).await.context("Error initiating a connection") {
@@ -115,6 +117,7 @@ pub async fn handle_connections(
                        if let Err(e) = initiate_connection(
                            listener_socket_addr,
                            &mut form_connections_with,
+                           &mut await_connections_from,
                            client_config.clone(),
                            &to_main
                        ).await.context("Error initiating a connection") {
@@ -133,7 +136,12 @@ pub async fn handle_connections(
                     },
 
                     result = unmanaged_connections.next() => {
-                        handle_unmanaged_connection(result,&mut form_connections_with,&to_main).await
+                        handle_unmanaged_connection(
+                            result,
+                            &mut form_connections_with,
+                            &mut await_connections_from,
+                            &to_main
+                        ).await
                     }
 
                     connection = tcp_lisenter.accept() => {
@@ -173,6 +181,7 @@ pub async fn handle_connections(
 async fn initiate_connection(
     listener_socket_addr: SocketAddr,
     form_connections_with: &mut Vec<(usize, SocketAddr)>,
+    await_connections_from: &mut Vec<(usize, SocketAddr)>,
     client_config: Arc<ClientConfig>,
     to_main: &mpsc::Sender<ToMain>,
 ) -> Result<()> {
@@ -229,7 +238,11 @@ async fn initiate_connection(
         .iter()
         .position(|&(vec_id, _)| vec_id == id);
     if let Some(index) = index {
-        let _ = form_connections_with.remove(index);
+        let removed = form_connections_with.remove(index);
+
+        if !connected {
+            await_connections_from.push(removed);
+        }
     }
 
     if !connected {
@@ -279,6 +292,7 @@ async fn handle_from_main(from_main: Option<FromMain>) -> LoopEnd {
 async fn handle_unmanaged_connection(
     msg: Option<Result<(IncomingMessage, TlsConnection<TcpStream>)>>,
     form_connections_with: &mut Vec<(usize, SocketAddr)>,
+    await_connections_from: &mut Vec<(usize, SocketAddr)>,
     to_main: &mpsc::Sender<ToMain>,
 ) {
     match msg {
@@ -294,7 +308,7 @@ async fn handle_unmanaged_connection(
             let mut id = None;
             let mut listener_socket_addr = None;
 
-            let index = form_connections_with
+            let mut index = form_connections_with
                 .iter()
                 .position(|&(vec_id, element_addr)| {
                     if element_addr == addr {
@@ -305,6 +319,8 @@ async fn handle_unmanaged_connection(
                         false
                     }
                 });
+
+            // TODO: reduce duplicate code
 
             if let Some(index) = index {
                 if let Err(e) = to_main
@@ -322,6 +338,37 @@ async fn handle_unmanaged_connection(
                     );
                 };
                 let _ = form_connections_with.remove(index);
+            } else {
+                index = await_connections_from
+                    .iter()
+                    .position(|&(vec_id, element_addr)| {
+                        if element_addr == addr {
+                            id = Some(vec_id);
+                            listener_socket_addr = Some(element_addr);
+                            true
+                        } else {
+                            false
+                        }
+                    });
+
+                if let Some(index) = index {
+                    if let Err(e) = to_main
+                        .send(ToMain::ConnectedPeer(
+                            id.unwrap(),
+                            listener_socket_addr.unwrap(),
+                            connection,
+                        ))
+                        .await
+                    {
+                        tracing::error!(
+                            "Error while notifying main of ConnectedPeer with ID {}: {}",
+                            id.unwrap(),
+                            e
+                        );
+                    };
+
+                    let _ = await_connections_from.remove(index);
+                }
             }
         }
 
