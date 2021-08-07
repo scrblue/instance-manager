@@ -1,10 +1,14 @@
 use super::peer_connection;
-use crate::messages::ManagerManagerRequest;
+use crate::messages::{ManagerManagerRequest, ManagerManagerResponse};
 
 use anyhow::Result;
+use async_raft::raft::AppendEntriesResponse;
 use indradb::{Datastore, Transaction};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::{net::TcpStream, sync::mpsc};
+use tokio::{
+    net::TcpStream,
+    sync::{mpsc, oneshot},
+};
 use tokio_tls::TlsConnection;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -16,6 +20,11 @@ use PeerTrackerToMain as ToMain;
 #[derive(Debug)]
 pub enum MainToPeerTracker {
     NewPeer(usize, SocketAddr, TlsConnection<TcpStream>),
+    ManagerManagerRequest(
+        u64,
+        ManagerManagerRequest,
+        oneshot::Sender<ManagerManagerResponse>,
+    ),
     Shutdown,
 }
 use MainToPeerTracker as FromMain;
@@ -112,6 +121,7 @@ pub async fn track_peers(
 
                             },
 
+
                             Err(e) => {
                                 tracing::error!("Error creating transaction from state handle: {}", e);
                                 break;
@@ -127,6 +137,11 @@ pub async fn track_peers(
                             )),
                             sender
                         ));
+                    }
+
+                    Some(other) => {
+                        // TODO: ManagerManagerRequest message handling
+                        tracing::error!("Unimplemented request: {:?}", other);
                     }
 
                     None => {
