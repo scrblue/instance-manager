@@ -14,6 +14,7 @@ mod io;
 mod messages;
 mod peers;
 use peers::peer_tracker;
+mod state_manager;
 mod tls;
 
 use connection_manager::ConnectionManagerToMain as FromConnectionManager;
@@ -26,8 +27,11 @@ use peer_tracker::PeerTrackerToMain as FromPeerTracker;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The local configuration and shared configuration are loaded from a file specified by the
+    // argument given to the program on launch
     let (local_conf, core_conf) = configuration::setup().await?;
 
+    // Setup logging
     let log_level = tracing::Level::from_str(local_conf.log_level.as_deref().unwrap_or("INFO"))?;
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         .with_max_level(log_level)
@@ -35,6 +39,7 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
     tracing::info!("Loaded configuration and logging enabled");
 
+    // The ConnectionManager requires a server and client configuration for TLS
     let (server_conf, client_conf) = tls::set_up_config(
         &core_conf.root_ca_cert,
         Some(&core_conf.node_ca_cert),
@@ -47,25 +52,27 @@ async fn main() -> Result<()> {
     let server_conf = Arc::new(server_conf);
     let client_conf = Arc::new(client_conf);
 
-    let distributed_conf = Arc::new(
-        indradb::RocksdbDatastore::new(local_conf.shared_conf_db_path, None)
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?,
-    );
-    let state = Arc::new(indradb::MemoryDatastore::create(
+    // The state manager controls the databases and the handle is an abstraction for queries to it
+    let state_manager = state_manager::StateManager::new(
+        local_conf.shared_conf_db_path,
         local_conf.cache_file_path,
-    )?);
-
-    let (mut io_s, mut io_r) = mpsc::channel::<FromIo>(128);
+    )?;
+    let state_handle = state_manager.handle();
+    state_manager.run();
 
     // Spawn IO thread
+    let (mut io_s, mut io_r) = mpsc::channel::<FromIo>(128);
     tokio::spawn(io::handle_io(io_s));
 
     // Spawn connection managment thread
+
+    // First create the channels
     let (connection_manager_to_main_s, mut connection_manager_r) =
         mpsc::channel::<FromConnectionManager>(128);
     let (mut connection_manager_s, main_to_connection_manager_r) =
         mpsc::channel::<ToConnectionManager>(128);
 
+    // Create a SocketAddr type from the local configuration
     let listener_socket_addr = SocketAddr::from((local_conf.public_ip, local_conf.port_bound));
 
     // Filter the global list of peers so that the address of this manager is not included
@@ -84,6 +91,7 @@ async fn main() -> Result<()> {
         .map(|id_and_addr| *id_and_addr)
         .collect::<Vec<_>>();
 
+    // Then actually spawn it
     tokio::spawn(connection_manager::handle_connections(
         connection_manager_to_main_s,
         main_to_connection_manager_r,
@@ -94,34 +102,14 @@ async fn main() -> Result<()> {
     ));
 
     // Insert self into graph of running instances
-    let transaction = (*state)
-        .transaction()
-        .map_err(|e| anyhow::anyhow!("Error creating Transaction for state: {}", e))?;
-    let self_uuid = transaction
-        .create_vertex_from_type(indradb::Type::new("InstanceManager").unwrap())
-        .unwrap();
-
-    // Then set its instance_id and socket_addr
-    let _ = transaction
-        .set_vertex_properties(
-            indradb::VertexPropertyQuery::new(
-                indradb::SpecificVertexQuery::single(self_uuid).into(),
-                "instance_id",
-            ),
-            &serde_json::Value::Number(
-                serde_json::Number::from_f64(self_id.unwrap() as f64).unwrap(),
-            ),
+    let self_uuid = state_handle
+        .add_peer(
+            self_id.ok_or(anyhow::anyhow!(
+                "This InstanceManager is not a part of the shared configuration"
+            ))?,
+            listener_socket_addr,
         )
-        .unwrap();
-    let _ = transaction
-        .set_vertex_properties(
-            indradb::VertexPropertyQuery::new(
-                indradb::SpecificVertexQuery::single(self_uuid).into(),
-                "socket_addr",
-            ),
-            &serde_json::Value::String(format!("{}", listener_socket_addr)),
-        )
-        .unwrap();
+        .await?;
 
     // Spawn peer tracking thread
     let (mut peer_tracker_to_main_s, mut peer_tracker_r) = mpsc::channel::<FromPeerTracker>(128);
@@ -130,7 +118,7 @@ async fn main() -> Result<()> {
     tokio::spawn(peer_tracker::track_peers(
         peer_tracker_to_main_s,
         main_to_peer_tracker_r,
-        state.clone(),
+        state_handle.clone(),
     ));
 
     // Spawn instance tracking thread

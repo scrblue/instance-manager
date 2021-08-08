@@ -14,7 +14,7 @@ use tokio_tls::TlsConnection;
 
 #[derive(Debug)]
 pub enum ConnectionManagerToMain {
-    ConnectedPeer(usize, SocketAddr, TlsConnection<TcpStream>),
+    ConnectedPeer(u64, SocketAddr, TlsConnection<TcpStream>),
     ConnectedInstance(SocketAddr),
     FailedToConnect(SocketAddr),
 }
@@ -39,7 +39,7 @@ pub async fn handle_connections(
     listener_socket_addr: SocketAddr,
     server_config: Arc<ServerConfig>,
     client_config: Arc<ClientConfig>,
-    initial_connections: Vec<(usize, SocketAddr)>,
+    initial_connections: Vec<(u64, SocketAddr)>,
 ) -> Result<()> {
     // Start listening
     let tcp_lisenter = TcpListener::bind(listener_socket_addr).await?;
@@ -180,8 +180,8 @@ pub async fn handle_connections(
 #[tracing::instrument(skip(client_config, to_main))]
 async fn initiate_connection(
     listener_socket_addr: SocketAddr,
-    form_connections_with: &mut Vec<(usize, SocketAddr)>,
-    await_connections_from: &mut Vec<(usize, SocketAddr)>,
+    form_connections_with: &mut Vec<(u64, SocketAddr)>,
+    await_connections_from: &mut Vec<(u64, SocketAddr)>,
     client_config: Arc<ClientConfig>,
     to_main: &mpsc::Sender<ToMain>,
 ) -> Result<()> {
@@ -291,8 +291,8 @@ async fn handle_from_main(from_main: Option<FromMain>) -> LoopEnd {
 #[tracing::instrument(skip(to_main))]
 async fn handle_unmanaged_connection(
     msg: Option<Result<(IncomingMessage, TlsConnection<TcpStream>)>>,
-    form_connections_with: &mut Vec<(usize, SocketAddr)>,
-    await_connections_from: &mut Vec<(usize, SocketAddr)>,
+    form_connections_with: &mut Vec<(u64, SocketAddr)>,
+    await_connections_from: &mut Vec<(u64, SocketAddr)>,
     to_main: &mpsc::Sender<ToMain>,
 ) {
     match msg {

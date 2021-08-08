@@ -10,7 +10,7 @@ pub async fn handle_peer_connection(
     to_tracker: mpsc::Sender<ToTracker>,
     mut from_tracker: mpsc::Receiver<FromTracker>,
     mut connection: TlsConnection<TcpStream>,
-    id: usize,
+    id: u64,
 ) {
     loop {
         tokio::select! {

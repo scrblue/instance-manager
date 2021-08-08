@@ -219,6 +219,7 @@ dependencies = [
  "tracing-log",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
  "webpki",
 ]
 
