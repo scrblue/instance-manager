@@ -104,12 +104,12 @@ impl StateHandle {
             transaction
                 .create_edge(&key)
                 .map_err(|e| anyhow::anyhow!("Error creating `peers_with` relationship: {}", e))?;
-            transaction
-                .create_edge(&key_rev)
-                .map_err(|e| anyhow::anyhow!("Error creating `peers_with` relationship: {}", e))?;
+            transaction.create_edge(&key_rev).map_err(|e| {
+                anyhow::anyhow!("Error creating reversed `peers_with` relationship: {}", e)
+            })?;
         }
 
-		Ok(new_instance_manager_uuid)
+        Ok(new_instance_manager_uuid)
     }
 }
 

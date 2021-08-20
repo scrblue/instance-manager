@@ -22,9 +22,6 @@ use connection_manager::MainToConnectionManager as ToConnectionManager;
 
 use io::IoToMain as FromIo;
 
-use peer_tracker::MainToPeerTracker as ToPeerTracker;
-use peer_tracker::PeerTrackerToMain as FromPeerTracker;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // The local configuration and shared configuration are loaded from a file specified by the
@@ -58,10 +55,10 @@ async fn main() -> Result<()> {
         local_conf.cache_file_path,
     )?;
     let state_handle = state_manager.handle();
-    state_manager.run();
+    tokio::spawn(state_manager.run());
 
     // Spawn IO thread
-    let (mut io_s, mut io_r) = mpsc::channel::<FromIo>(128);
+    let (io_s, mut io_r) = mpsc::channel::<FromIo>(128);
     tokio::spawn(io::handle_io(io_s));
 
     // Spawn connection managment thread
@@ -102,7 +99,7 @@ async fn main() -> Result<()> {
     ));
 
     // Insert self into graph of running instances
-    let self_uuid = state_handle
+    let _self_uuid = state_handle
         .add_peer(
             self_id.ok_or(anyhow::anyhow!(
                 "This InstanceManager is not a part of the shared configuration"
@@ -112,14 +109,9 @@ async fn main() -> Result<()> {
         .await?;
 
     // Spawn peer tracking thread
-    let (mut peer_tracker_to_main_s, mut peer_tracker_r) = mpsc::channel::<FromPeerTracker>(128);
-    let (mut peer_tracker_s, mut main_to_peer_tracker_r) = mpsc::channel::<ToPeerTracker>(128);
-
-    tokio::spawn(peer_tracker::track_peers(
-        peer_tracker_to_main_s,
-        main_to_peer_tracker_r,
-        state_handle.clone(),
-    ));
+	let peer_tracker = peer_tracker::PeerTacker::new(state_handle.clone());
+	let peer_tracker_handle = peer_tracker.handle();
+    tokio::spawn(peer_tracker.run());
 
     // Spawn instance tracking thread
 
@@ -140,8 +132,9 @@ async fn main() -> Result<()> {
 
             msg = connection_manager_r.recv() => {
                 match msg {
+                    // TODO: Give ConnectionManager a PeerTrackerHandle
                     Some(FromConnectionManager::ConnectedPeer(id, listener_addr, stream)) => {
-                        peer_tracker_s.send(ToPeerTracker::NewPeer(id, listener_addr, stream)).await?;
+                        peer_tracker_handle.add_peer(id, listener_addr, stream).await?;
                     },
                     Some(msg) => tracing::info!("CM msg: {:?}", msg),
                     None => {
@@ -151,16 +144,6 @@ async fn main() -> Result<()> {
                     },
                 }
             }
-
-            msg = peer_tracker_r.recv() => {
-                match msg {
-                   Some(msg) => tracing::info!("PT msg: {:?}", msg),
-                   None => {
-                       tracing::error!("Peer tracker channel closed");
-                       break;
-                   }
-                }
-            }
         }
     }
 
@@ -168,7 +151,7 @@ async fn main() -> Result<()> {
         .send(ToConnectionManager::Shutdown)
         .await?;
 
-    peer_tracker_s.send(ToPeerTracker::Shutdown).await?;
+    peer_tracker_handle.shutdown().await?;
 
     // FIXME: IO shutdown
 

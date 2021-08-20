@@ -220,9 +220,7 @@ async fn initiate_connection(
         let mut stream = TlsConnection::new(stream);
 
         stream
-            .send_message(&IncomingMessage::ManagerManagerRequest(
-                ManagerManagerRequest::Greeting(listener_socket_addr),
-            ))
+            .send_message(&Greeting::Peer(listener_socket_addr))
             .await
             .unwrap();
 
@@ -290,16 +288,13 @@ async fn handle_from_main(from_main: Option<FromMain>) -> LoopEnd {
 
 #[tracing::instrument(skip(to_main))]
 async fn handle_unmanaged_connection(
-    msg: Option<Result<(IncomingMessage, TlsConnection<TcpStream>)>>,
+    msg: Option<Result<(Greeting, TlsConnection<TcpStream>)>>,
     form_connections_with: &mut Vec<(u64, SocketAddr)>,
     await_connections_from: &mut Vec<(u64, SocketAddr)>,
     to_main: &mpsc::Sender<ToMain>,
 ) {
     match msg {
-        Some(Ok((
-            IncomingMessage::ManagerManagerRequest(ManagerManagerRequest::Greeting(addr)),
-            connection,
-        ))) => {
+        Some(Ok((Greeting::Peer(addr), connection))) => {
             tracing::info!(
                 "Received connection from client peer who listens on {}",
                 addr

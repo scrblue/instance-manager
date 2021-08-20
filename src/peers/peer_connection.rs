@@ -17,7 +17,11 @@ pub async fn handle_peer_connection(
             msg = from_tracker.recv() => {
                 match msg {
                     Some(FromTracker::Shutdown) => break,
-                    msg => tracing::info!("Received message from peer tracker: {:?}", msg),
+                    Some(msg) => tracing::info!("Received message from peer tracker: {:?}", msg),
+                    None => {
+                        tracing::error!("Channel from tracker is closed");
+                        break;
+                    },
                 };
             },
             msg = connection.read_message::<ManagerManagerRequest>() => {
