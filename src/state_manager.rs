@@ -125,6 +125,53 @@ impl StateHandle {
 
         Ok(rx.await?)
     }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_hard_state(&self) -> Result<Option<HardState>> {
+        let transaction = self.get_dcr_transaction().await?;
+
+        let json = transaction
+            .get_vertex_properties(VertexPropertyQuery::new(
+                RangeVertexQuery::new()
+                    .limit(1)
+                    .t(Type::new("HardState")?)
+                    .into(),
+                "hard_state",
+            ))
+            .map_err(|e| anyhow::anyhow!("Error fetching HardState: {}", e))?
+            .pop();
+
+        if let Some(json) = json {
+            let parsed = serde_json::from_value(json.value)?;
+            Ok(parsed)
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_last_applied_entry(&self) -> Result<Option<u64>> {
+        let transaction = self.get_dcr_transaction().await?;
+
+        let json = transaction
+            .get_vertex_properties(VertexPropertyQuery::new(
+                RangeVertexQuery::new()
+                    .limit(1)
+                    .t(Type::new("StateMachine")?)
+                    .into(),
+                "last_applied",
+            ))
+            .map_err(|e| anyhow::anyhow!("Error fetching HardState: {}", e))?
+            .pop();
+
+        if let Some(json) = json {
+            let parsed = serde_json::from_value(json.value)?;
+            Ok(parsed)
+        } else {
+            Ok(None)
+        }
+    }
+
     #[tracing::instrument(skip(self))]
     async fn get_last_log_entry(&self) -> Result<Option<Vertex>> {
         let transaction = self.get_dcr_transaction().await?;
@@ -138,6 +185,22 @@ impl StateHandle {
             )
             .map_err(|e| anyhow::anyhow!("Error fetching pointer to last log entry"))?
             .pop())
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_entry_for_log_entry(&self, log: &Vertex) -> Result<Entry<RaftRequest>> {
+        let transaction = self.get_dcr_transaction().await?;
+
+        let prop = transaction
+            .get_vertex_properties(VertexPropertyQuery::new(
+                SpecificVertexQuery::single(log.id).into(),
+                "log_entry",
+            ))
+            .map_err(|e| anyhow::anyhow!("Error fetching EntryPayload for vertex: {}", e))?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("Vertex given does not have log_entry"))?;
+
+        Ok(serde_json::from_value(prop.value)?)
     }
 
     #[tracing::instrument(skip(self))]
@@ -233,7 +296,58 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_initial_state(&self) -> Result<InitialState> {}
+    async fn get_initial_state(&self) -> Result<InitialState> {
+        let last = self.get_last_log_entry().await?;
+
+        if let Some(mut last) = last {
+            let mut membership = None;
+            let mut last_log_index = None;
+            let mut last_log_term = None;
+
+            while membership.is_none() {
+                let entry = self.get_entry_for_log_entry(&last).await?;
+
+                if last_log_index.is_none() {
+                    last_log_index = Some(entry.index);
+                    last_log_term = Some(entry.term);
+                }
+
+                match entry.payload {
+                    EntryPayload::ConfigChange(cc) => {
+                        membership = Some(cc.membership.clone());
+                        break;
+                    }
+                    EntryPayload::SnapshotPointer(sp) => {
+                        membership = Some(sp.membership.clone());
+                        break;
+                    }
+                    _ => {
+                        last = self
+                            .get_previous_log_entry(&last)
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("No previous log entry"))?;
+                        continue;
+                    }
+                };
+            }
+
+
+            let last_applied_log = self.get_last_applied_entry().await?;
+           	let hard_state = self.get_hard_state().await?;
+
+           	Ok(InitialState {
+				last_log_index: last_log_index.unwrap(),
+				last_log_term: last_log_term.unwrap(),
+				last_applied_log: last_applied_log.unwrap(),
+				hard_state: hard_state.unwrap(),
+				membership: membership.unwrap(),
+           	})
+
+			
+        } else {
+            Ok(InitialState::new_initial(self.self_raft_id))
+        }
+    }
 
     #[tracing::instrument(skip(self))]
     async fn save_hard_state(&self, hs: &HardState) -> Result<()> {}
@@ -283,8 +397,8 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
 }
 
 pub struct StateManager {
-	self_raft_id: u64,
-    
+    self_raft_id: u64,
+
     distributed_conf: RocksdbDatastore,
     distributed_conf_request_receiver: mpsc::Receiver<oneshot::Sender<RocksdbTransaction>>,
     temporary_state: MemoryDatastore,
@@ -300,7 +414,11 @@ pub struct StateManager {
 
 impl StateManager {
     #[tracing::instrument]
-    pub fn new(self_raft_id: u64, distributed_path: PathBuf, temporary_path: PathBuf) -> Result<StateManager> {
+    pub fn new(
+        self_raft_id: u64,
+        distributed_path: PathBuf,
+        temporary_path: PathBuf,
+    ) -> Result<StateManager> {
         let distributed_conf = indradb::RocksdbDatastore::new(distributed_path, None)
             .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
@@ -311,7 +429,7 @@ impl StateManager {
         let (sdr_sender, shutdown_request_receiver) = mpsc::channel(128);
 
         Ok(StateManager {
-           	self_raft_id,
+            self_raft_id,
             distributed_conf,
             distributed_conf_request_receiver,
             temporary_state,
