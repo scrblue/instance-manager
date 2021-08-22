@@ -15,6 +15,8 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct StateHandle {
     dcr_sender: mpsc::Sender<oneshot::Sender<RocksdbTransaction>>,
+    dcr_sync_sender: mpsc::Sender<()>,
+
     tsr_sender: mpsc::Sender<oneshot::Sender<MemoryTransaction>>,
 
     sdr_sender: mpsc::Sender<()>,
@@ -331,26 +333,45 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
                 };
             }
 
-
             let last_applied_log = self.get_last_applied_entry().await?;
-           	let hard_state = self.get_hard_state().await?;
+            let hard_state = self.get_hard_state().await?;
 
-           	Ok(InitialState {
-				last_log_index: last_log_index.unwrap(),
-				last_log_term: last_log_term.unwrap(),
-				last_applied_log: last_applied_log.unwrap(),
-				hard_state: hard_state.unwrap(),
-				membership: membership.unwrap(),
-           	})
-
-			
+            Ok(InitialState {
+                last_log_index: last_log_index.unwrap(),
+                last_log_term: last_log_term.unwrap(),
+                last_applied_log: last_applied_log.unwrap(),
+                hard_state: hard_state.unwrap(),
+                membership: membership.unwrap(),
+            })
         } else {
             Ok(InitialState::new_initial(self.self_raft_id))
         }
     }
 
     #[tracing::instrument(skip(self))]
-    async fn save_hard_state(&self, hs: &HardState) -> Result<()> {}
+    async fn save_hard_state(&self, hs: &HardState) -> Result<()> {
+        let transaction = self.get_dcr_transaction().await?;
+
+        transaction
+            .set_vertex_properties(
+                VertexPropertyQuery::new(
+                    RangeVertexQuery::new()
+                        .limit(1)
+                        .t(Type::new("HardState")?)
+                        .into(),
+                    "hard_state",
+                ),
+                &serde_json::json!(hs),
+            )
+            .map_err(|e| anyhow::anyhow!("Error saving HardState: {}", e))?;
+
+        self.dcr_sync_sender.send(()).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Error sending sync state request while saving HardState: {}",
+                e
+            )
+        })
+    }
 
     #[tracing::instrument(skip(self))]
     async fn get_log_entries(&self, start: u64, stop: u64) -> Result<Vec<Entry<RaftRequest>>> {}
@@ -401,6 +422,8 @@ pub struct StateManager {
 
     distributed_conf: RocksdbDatastore,
     distributed_conf_request_receiver: mpsc::Receiver<oneshot::Sender<RocksdbTransaction>>,
+    distributed_conf_sync_request_receiver: mpsc::Receiver<()>,
+
     temporary_state: MemoryDatastore,
     temporary_state_request_receiver: mpsc::Receiver<oneshot::Sender<MemoryTransaction>>,
 
@@ -408,6 +431,7 @@ pub struct StateManager {
 
     // The senders to be cloned when spawning a StateHandle
     dcr_sender: mpsc::Sender<oneshot::Sender<RocksdbTransaction>>,
+    dcs_sender: mpsc::Sender<()>,
     tsr_sender: mpsc::Sender<oneshot::Sender<MemoryTransaction>>,
     sdr_sender: mpsc::Sender<()>,
 }
@@ -425,6 +449,7 @@ impl StateManager {
         let temporary_state = indradb::MemoryDatastore::create(temporary_path)?;
 
         let (dcr_sender, distributed_conf_request_receiver) = mpsc::channel(128);
+        let (dcs_sender, distributed_conf_sync_request_receiver) = mpsc::channel(128);
         let (tsr_sender, temporary_state_request_receiver) = mpsc::channel(128);
         let (sdr_sender, shutdown_request_receiver) = mpsc::channel(128);
 
@@ -432,10 +457,12 @@ impl StateManager {
             self_raft_id,
             distributed_conf,
             distributed_conf_request_receiver,
+            distributed_conf_sync_request_receiver,
             temporary_state,
             temporary_state_request_receiver,
             shutdown_request_receiver,
             dcr_sender,
+            dcs_sender,
             tsr_sender,
             sdr_sender,
         })
@@ -446,6 +473,7 @@ impl StateManager {
         StateHandle {
             self_raft_id: self.self_raft_id,
             dcr_sender: self.dcr_sender.clone(),
+            dcr_sync_sender: self.dcs_sender.clone(),
             tsr_sender: self.tsr_sender.clone(),
             sdr_sender: self.sdr_sender.clone(),
         }
