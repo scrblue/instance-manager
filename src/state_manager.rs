@@ -374,7 +374,29 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_log_entries(&self, start: u64, stop: u64) -> Result<Vec<Entry<RaftRequest>>> {}
+    async fn get_log_entries(&self, start: u64, stop: u64) -> Result<Vec<Entry<RaftRequest>>> {
+        let transaction = self.get_dcr_transaction().await?;
+
+        let all_logs = transaction
+            .get_all_vertex_properties(RangeVertexQuery::new().t(Type::new("LogEntry")?))
+            .map_err(|e| anyhow::anyhow!("Error while fetching entries: {}", e))?;
+
+        Ok(all_logs
+            .iter()
+            .filter_map(|vertex_properties| {
+                // TODO: Error handling
+                let log_entry = vertex_properties.props.pop()?;
+                let log_entry: Entry<RaftRequest> = serde_json::from_value(log_entry.value)
+                    .map_err(|e| anyhow::anyhow!("Error deserializing log entries: {}", e))
+                    .unwrap();
+                if log_entry.index >= start && log_entry.index < stop {
+                    Some(log_entry)
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
 
     #[tracing::instrument(skip(self))]
     async fn delete_logs_from(&self, start: u64, stop: Option<u64>) -> Result<()> {}
