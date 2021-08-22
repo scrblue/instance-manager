@@ -1,10 +1,14 @@
+use crate::messages::{RaftRequest, RaftResponse};
+
 use anyhow::Result;
+use async_raft::{async_trait::async_trait, raft::*, storage::*, RaftStorage};
 use indradb::{
-    Datastore, EdgeKey, MemoryDatastore, MemoryTransaction, RangeVertexQuery, RocksdbDatastore,
-    RocksdbTransaction, SpecificVertexQuery, Transaction, Type, Vertex, VertexPropertyQuery,
+    Datastore, EdgeKey, EdgeQuery, EdgeQueryExt, MemoryDatastore, MemoryTransaction,
+    RangeVertexQuery, RocksdbDatastore, RocksdbTransaction, SpecificVertexQuery, Transaction, Type,
+    Vertex, VertexPropertyQuery, VertexQuery, VertexQueryExt,
 };
 use serde_json::{value, Value};
-use std::{net::SocketAddr, path::PathBuf};
+use std::{error::Error, net::SocketAddr, path::PathBuf};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -14,6 +18,8 @@ pub struct StateHandle {
     tsr_sender: mpsc::Sender<oneshot::Sender<MemoryTransaction>>,
 
     sdr_sender: mpsc::Sender<()>,
+
+    self_raft_id: u64,
 }
 
 impl StateHandle {
@@ -111,9 +117,174 @@ impl StateHandle {
 
         Ok(new_instance_manager_uuid)
     }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_dcr_transaction(&self) -> Result<RocksdbTransaction> {
+        let (tx, rx) = oneshot::channel();
+        self.dcr_sender.send(tx).await?;
+
+        Ok(rx.await?)
+    }
+    #[tracing::instrument(skip(self))]
+    async fn get_last_log_entry(&self) -> Result<Option<Vertex>> {
+        let transaction = self.get_dcr_transaction().await?;
+        Ok(transaction
+            .get_vertices(
+                RangeVertexQuery::new()
+                    .limit(1)
+                    .t(indradb::Type::new("LastLogTracker")?)
+                    .outbound()
+                    .outbound(),
+            )
+            .map_err(|e| anyhow::anyhow!("Error fetching pointer to last log entry"))?
+            .pop())
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_entry_payload_for_log_entry(
+        &self,
+        log: &Vertex,
+    ) -> Result<EntryPayload<RaftRequest>> {
+        let transaction = self.get_dcr_transaction().await?;
+
+        let prop = transaction
+            .get_vertex_properties(VertexPropertyQuery::new(
+                SpecificVertexQuery::single(log.id).into(),
+                "log_entry",
+            ))
+            .map_err(|e| anyhow::anyhow!("Error fetching EntryPayload for vertex: {}", e))?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("Vertex given does not have log_entry"))?;
+
+        let entry: Entry<RaftRequest> = serde_json::from_value(prop.value)?;
+
+        Ok(entry.payload)
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_previous_log_entry(&self, log: &Vertex) -> Result<Option<Vertex>> {
+        let transaction = self.get_dcr_transaction().await?;
+
+        Ok(transaction
+            .get_vertices(
+                SpecificVertexQuery::single(log.id)
+                    .outbound()
+                    .t(Type::new("following")?)
+                    .outbound(),
+            )
+            .map_err(|e| anyhow::anyhow!("Error fetching previous log entry"))?
+            .pop())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum RaftStorageError {
+    Unknown,
+}
+
+impl std::fmt::Display for RaftStorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Unknown Raft storage error")
+    }
+}
+
+impl Error for RaftStorageError {}
+
+#[async_trait]
+impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
+    type Snapshot = tokio::fs::File;
+    type ShutdownError = RaftStorageError;
+
+    #[tracing::instrument(skip(self))]
+    async fn get_membership_config(&self) -> Result<MembershipConfig> {
+        let last = self.get_last_log_entry().await?;
+
+        // If there is a last log entry, search in reverse to find the most recent membership config
+        // A snapshot pointer will also contain a membership config
+        if let Some(mut last) = last {
+            let mut membership_config = None;
+
+            while membership_config.is_none() {
+                match self.get_entry_payload_for_log_entry(&last).await? {
+                    EntryPayload::ConfigChange(cc) => {
+                        membership_config = Some(cc.membership.clone());
+                        break;
+                    }
+                    EntryPayload::SnapshotPointer(sp) => {
+                        membership_config = Some(sp.membership.clone());
+                        break;
+                    }
+                    _ => {
+                        last = self
+                            .get_previous_log_entry(&last)
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("No previous log entry"))?;
+                        continue;
+                    }
+                }
+            }
+
+            Ok(membership_config.unwrap())
+        }
+        // If there is no last log entry, return an initiall MembershipConfig
+        else {
+            Ok(MembershipConfig::new_initial(self.self_raft_id))
+        }
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_initial_state(&self) -> Result<InitialState> {}
+
+    #[tracing::instrument(skip(self))]
+    async fn save_hard_state(&self, hs: &HardState) -> Result<()> {}
+
+    #[tracing::instrument(skip(self))]
+    async fn get_log_entries(&self, start: u64, stop: u64) -> Result<Vec<Entry<RaftRequest>>> {}
+
+    #[tracing::instrument(skip(self))]
+    async fn delete_logs_from(&self, start: u64, stop: Option<u64>) -> Result<()> {}
+
+    #[tracing::instrument(skip(self))]
+    async fn append_entry_to_log(&self, entry: &Entry<RaftRequest>) -> Result<()> {}
+
+    #[tracing::instrument(skip(self))]
+    async fn replicate_to_log(&self, entries: &[Entry<RaftRequest>]) -> Result<()> {}
+
+    #[tracing::instrument(skip(self))]
+    async fn apply_entry_to_state_machine(
+        &self,
+        index: &u64,
+        data: &RaftRequest,
+    ) -> Result<RaftResponse> {
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn replicate_to_state_machine(&self, entries: &[(&u64, &RaftRequest)]) -> Result<()> {}
+
+    #[tracing::instrument(skip(self))]
+    async fn do_log_compaction(&self) -> Result<CurrentSnapshotData<Self::Snapshot>> {}
+
+    #[tracing::instrument(skip(self))]
+    async fn create_snapshot(&self) -> Result<(String, Box<Self::Snapshot>)> {}
+
+    #[tracing::instrument(skip(self))]
+    async fn finalize_snapshot_installation(
+        &self,
+        index: u64,
+        term: u64,
+        delete_through: Option<u64>,
+        id: String,
+        snapshot: Box<Self::Snapshot>,
+    ) -> Result<()> {
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_current_snapshot(&self) -> Result<Option<CurrentSnapshotData<Self::Snapshot>>> {}
 }
 
 pub struct StateManager {
+	self_raft_id: u64,
+    
     distributed_conf: RocksdbDatastore,
     distributed_conf_request_receiver: mpsc::Receiver<oneshot::Sender<RocksdbTransaction>>,
     temporary_state: MemoryDatastore,
@@ -129,7 +300,7 @@ pub struct StateManager {
 
 impl StateManager {
     #[tracing::instrument]
-    pub fn new(distributed_path: PathBuf, temporary_path: PathBuf) -> Result<StateManager> {
+    pub fn new(self_raft_id: u64, distributed_path: PathBuf, temporary_path: PathBuf) -> Result<StateManager> {
         let distributed_conf = indradb::RocksdbDatastore::new(distributed_path, None)
             .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
@@ -140,6 +311,7 @@ impl StateManager {
         let (sdr_sender, shutdown_request_receiver) = mpsc::channel(128);
 
         Ok(StateManager {
+           	self_raft_id,
             distributed_conf,
             distributed_conf_request_receiver,
             temporary_state,
@@ -154,6 +326,7 @@ impl StateManager {
     /// Returns a StateHandle to be used to interact with the StateManager after it has been spawned
     pub fn handle(&self) -> StateHandle {
         StateHandle {
+            self_raft_id: self.self_raft_id,
             dcr_sender: self.dcr_sender.clone(),
             tsr_sender: self.tsr_sender.clone(),
             sdr_sender: self.sdr_sender.clone(),

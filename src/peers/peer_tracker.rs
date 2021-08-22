@@ -181,10 +181,10 @@ impl PeerTacker {
     }
 
     pub fn handle(&self) -> PeerTrackerHandle {
-		PeerTrackerHandle {
-			request_sender: self.request_sender.clone(),
-			sdr_sender: self.sdr_sender.clone(),
-		}
+        PeerTrackerHandle {
+            request_sender: self.request_sender.clone(),
+            sdr_sender: self.sdr_sender.clone(),
+        }
     }
 
     #[tracing::instrument(skip(self))]

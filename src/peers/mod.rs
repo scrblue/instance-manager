@@ -11,4 +11,5 @@ pub enum ConnectionToTracker {
 #[derive(Debug)]
 pub enum TrackerToConnection {
     Shutdown,
+    Request(ManagerManagerRequest),
 }

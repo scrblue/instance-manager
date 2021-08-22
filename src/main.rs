@@ -49,26 +49,6 @@ async fn main() -> Result<()> {
     let server_conf = Arc::new(server_conf);
     let client_conf = Arc::new(client_conf);
 
-    // The state manager controls the databases and the handle is an abstraction for queries to it
-    let state_manager = state_manager::StateManager::new(
-        local_conf.shared_conf_db_path,
-        local_conf.cache_file_path,
-    )?;
-    let state_handle = state_manager.handle();
-    tokio::spawn(state_manager.run());
-
-    // Spawn IO thread
-    let (io_s, mut io_r) = mpsc::channel::<FromIo>(128);
-    tokio::spawn(io::handle_io(io_s));
-
-    // Spawn connection managment thread
-
-    // First create the channels
-    let (connection_manager_to_main_s, mut connection_manager_r) =
-        mpsc::channel::<FromConnectionManager>(128);
-    let (mut connection_manager_s, main_to_connection_manager_r) =
-        mpsc::channel::<ToConnectionManager>(128);
-
     // Create a SocketAddr type from the local configuration
     let listener_socket_addr = SocketAddr::from((local_conf.public_ip, local_conf.port_bound));
 
@@ -87,6 +67,27 @@ async fn main() -> Result<()> {
         })
         .map(|id_and_addr| *id_and_addr)
         .collect::<Vec<_>>();
+
+    // The state manager controls the databases and the handle is an abstraction for queries to it
+    let state_manager = state_manager::StateManager::new(
+        self_id.unwrap(),
+        local_conf.shared_conf_db_path,
+        local_conf.cache_file_path,
+    )?;
+    let state_handle = state_manager.handle();
+    tokio::spawn(state_manager.run());
+
+    // Spawn IO thread
+    let (io_s, mut io_r) = mpsc::channel::<FromIo>(128);
+    tokio::spawn(io::handle_io(io_s));
+
+    // Spawn connection managment thread
+
+    // First create the channels
+    let (connection_manager_to_main_s, mut connection_manager_r) =
+        mpsc::channel::<FromConnectionManager>(128);
+    let (connection_manager_s, main_to_connection_manager_r) =
+        mpsc::channel::<ToConnectionManager>(128);
 
     // Then actually spawn it
     tokio::spawn(connection_manager::handle_connections(
@@ -109,8 +110,8 @@ async fn main() -> Result<()> {
         .await?;
 
     // Spawn peer tracking thread
-	let peer_tracker = peer_tracker::PeerTacker::new(state_handle.clone());
-	let peer_tracker_handle = peer_tracker.handle();
+    let peer_tracker = peer_tracker::PeerTacker::new(state_handle.clone());
+    let peer_tracker_handle = peer_tracker.handle();
     tokio::spawn(peer_tracker.run());
 
     // Spawn instance tracking thread
@@ -152,6 +153,7 @@ async fn main() -> Result<()> {
         .await?;
 
     peer_tracker_handle.shutdown().await?;
+    state_handle.shutdown().await?;
 
     // FIXME: IO shutdown
 
