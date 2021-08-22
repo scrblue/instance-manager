@@ -240,6 +240,21 @@ impl StateHandle {
             .map_err(|e| anyhow::anyhow!("Error fetching previous log entry"))?
             .pop())
     }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_next_log_entry(&self, log: &Vertex) -> Result<Option<Vertex>> {
+        let transaction = self.get_dcr_transaction().await?;
+
+        Ok(transaction
+            .get_vertices(
+                SpecificVertexQuery::single(log.id)
+                    .outbound()
+                    .t(Type::new("followed_by")?)
+                    .outbound(),
+            )
+            .map_err(|e| anyhow::anyhow!("Error fetching next log entry"))?
+            .pop())
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -255,6 +270,8 @@ impl std::fmt::Display for RaftStorageError {
 
 impl Error for RaftStorageError {}
 
+// FIXME: First time adding of essential vertices like HardState, LastLogTracker, and StateMachinei
+// TODO: Cache the Uuids of these essential vertices
 #[async_trait]
 impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
     type Snapshot = tokio::fs::File;
@@ -381,7 +398,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
             .get_all_vertex_properties(RangeVertexQuery::new().t(Type::new("LogEntry")?))
             .map_err(|e| anyhow::anyhow!("Error while fetching entries: {}", e))?;
 
-        Ok(all_logs
+        let mut filtered_logs = all_logs
             .iter()
             .filter_map(|vertex_properties| {
                 // TODO: Error handling
@@ -395,11 +412,196 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
                     None
                 }
             })
-            .collect())
+            .collect::<Vec<Entry<RaftRequest>>>();
+
+        filtered_logs.sort_by(|&first, &second| first.index.partial_cmp(&second.index).unwrap());
+        Ok(filtered_logs)
     }
 
     #[tracing::instrument(skip(self))]
-    async fn delete_logs_from(&self, start: u64, stop: Option<u64>) -> Result<()> {}
+    async fn delete_logs_from(&self, start: u64, stop: Option<u64>) -> Result<()> {
+        // So the log is effectively a linked list in the database, so the vertices must be updated
+        // whille deleting logs. The LastLogTracker must also be updated if stop is None or the last
+        // entry to be updated. Make sure to also update the StateMachine's last_applied value
+
+        let transaction = self.get_dcr_transaction().await?;
+        let is_last;
+
+        // FIXME: What if stop is Some past the last entry
+
+        // Use the given stopping point or the latest log entry + 1
+        let stop = if let Some(stop) = stop {
+            is_last = false;
+            stop
+        } else {
+            is_last = true;
+            let last_log = self
+                .get_last_log_entry()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("No last log entry while deleting logs"))?;
+            let log_entry = self.get_entry_for_log_entry(&last_log).await?;
+            log_entry.index + 1
+        };
+
+        // Fetch every LogEntry in the database
+        let all_logs = transaction
+            .get_all_vertex_properties(RangeVertexQuery::new().t(Type::new("LogEntry")?))
+            .map_err(|e| anyhow::anyhow!("Error while fetching entries: {}", e))?;
+
+        // Noting the first and last logs, collect a vector containing the Uuids of every vertex to
+        // be deleted
+        let mut first_log = None;
+        let mut last_log = None;
+        let logs_to_delete: Vec<Uuid> = all_logs
+            .iter()
+            .filter_map(|vertex_properties| {
+                // TODO: Error handling
+                let log_entry = vertex_properties.props.pop()?;
+                let log_entry: Entry<RaftRequest> = serde_json::from_value(log_entry.value)
+                    .map_err(|e| anyhow::anyhow!("Error deserializing log entries: {}", e))
+                    .unwrap();
+                if log_entry.index >= start && log_entry.index < stop {
+                    if log_entry.index == start {
+                        first_log = Some(vertex_properties.vertex);
+                    } else if log_entry.index == stop - 1 {
+                        last_log = Some(vertex_properties.vertex);
+                    }
+
+                    Some(vertex_properties.vertex.id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // There will be two edges for the first and last log: the following relationship and the
+        // followed_by relationship. If the first log is *the first* log or the last log is *the last*
+        // log, then one of these will be omitted.
+
+        let before_first_log_id = self
+            .get_previous_log_entry(first_log.as_ref().unwrap())
+            .await?;
+        let after_last_log_id = self.get_next_log_entry(last_log.as_ref().unwrap()).await?;
+
+        match (before_first_log_id, after_last_log_id) {
+            (Some(before), Some(after)) => {
+                // In this case set the before's followed_by to after and after's following to before
+                transaction
+                    .create_edge(&EdgeKey::new(
+                        before.id,
+                        Type::new("followed_by")?,
+                        after.id,
+                    ))
+                    .map_err(|e| {
+                        anyhow::anyhow!("Error setting followed_by edge while deleting logs: {}", e)
+                    })?;
+                transaction
+                    .create_edge(&EdgeKey::new(after.id, Type::new("following")?, before.id))
+                    .map_err(|e| {
+                        anyhow::anyhow!("Error setting following edge while deleting logs: {}", e)
+                    })?;
+            }
+            (Some(before), None) => {
+                // In this case delete before's followed_by, change the last_applied value of the
+                // StateMachine, and change the LastLogTracker's points_to edge
+                transaction
+                    .delete_edges(
+                        SpecificVertexQuery::single(before.id)
+                            .outbound()
+                            .t(Type::new("followed_by")?),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Error deleting followed_by edge while deleting logs: {}",
+                            e
+                        )
+                    })?;
+
+                let llt = transaction
+                    .get_vertices(
+                        RangeVertexQuery::new()
+                            .limit(1)
+                            .t(Type::new("LastLogTracker")?),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("Err fetching LastLogTracker while deleting logs: {}", e)
+                    })?
+                    .pop()
+                    .unwrap();
+
+                let sm = transaction
+                    .get_vertices(
+                        RangeVertexQuery::new()
+                            .limit(1)
+                            .t(Type::new("StateMachine")?),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("Err fetching StateMachine while deleting logs: {}", e)
+                    })?
+                    .pop()
+                    .unwrap();
+
+                transaction
+                    .create_edge(&EdgeKey::new(llt.id, Type::new("points_to")?, before.id))
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Error setting point_to for LastLogTracker while deleting logs: {}",
+                            e
+                        )
+                    })?;
+
+                let entry = self.get_entry_for_log_entry(&before).await?;
+
+                transaction
+                    .set_vertex_properties(
+                        VertexPropertyQuery::new(
+                            SpecificVertexQuery::single(sm.id).into(),
+                            "last_applied",
+                        ),
+                        &serde_json::json!(entry.index),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Error setting last_applied to StateMachine while deleting logs: {}",
+                            e
+                        )
+                    })?;
+            }
+            (None, Some(after)) => {
+                // In this case delete after's following
+                transaction
+                    .delete_edges(
+                        SpecificVertexQuery::single(after.id)
+                            .outbound()
+                            .t(Type::new("following")?),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Error deleting followed_by edge while deleting logs: {}",
+                            e
+                        )
+                    })?;
+            }
+            (None, None) => {
+                // In this case do nothing
+                // Or delete the LastLogTracker's points_to edge? TODO: Findo out if edges are
+                // deleted with vertices
+            }
+        };
+
+        // Then delete all the vertices
+        transaction
+            .delete_vertices(SpecificVertexQuery::new(logs_to_delete))
+            .map_err(|e| anyhow::anyhow!("Error deleting vertices while deleting logs: {}", e))?;
+
+        // And commit the changes
+        self.dcr_sync_sender.send(()).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Error sending sync state request while saving HardState: {}",
+                e
+            )
+        })
+    }
 
     #[tracing::instrument(skip(self))]
     async fn append_entry_to_log(&self, entry: &Entry<RaftRequest>) -> Result<()> {}
