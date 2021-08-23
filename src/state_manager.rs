@@ -8,12 +8,16 @@ use indradb::{
     Vertex, VertexPropertyQuery, VertexQuery, VertexQueryExt,
 };
 use serde_json::{value, Value};
-use std::{error::Error, net::SocketAddr, path::PathBuf};
-use tokio::sync::{mpsc, oneshot};
+use std::{
+    collections::btree_map::BTreeMap, error::Error, net::SocketAddr, path::PathBuf, sync::Arc,
+};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct StateHandle {
+    tlr_sender: mpsc::Sender<oneshot::Sender<Arc<RwLock<BTreeMap<u64, Entry<RaftRequest>>>>>>,
+
     dcr_sender: mpsc::Sender<oneshot::Sender<RocksdbTransaction>>,
     dcr_sync_sender: mpsc::Sender<()>,
 
@@ -129,6 +133,14 @@ impl StateHandle {
     }
 
     #[tracing::instrument(skip(self))]
+    async fn get_tlr_handle(&self) -> Result<Arc<RwLock<BTreeMap<u64, Entry<RaftRequest>>>>> {
+        let (tx, rx) = oneshot::channel();
+        self.tlr_sender.send(tx).await?;
+
+        Ok(rx.await?)
+    }
+
+    #[tracing::instrument(skip(self))]
     async fn get_hard_state(&self) -> Result<Option<HardState>> {
         let transaction = self.get_dcr_transaction().await?;
 
@@ -175,7 +187,7 @@ impl StateHandle {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_last_log_entry(&self) -> Result<Option<Vertex>> {
+    async fn get_last_log_segment(&self) -> Result<Option<Vertex>> {
         let transaction = self.get_dcr_transaction().await?;
         Ok(transaction
             .get_vertices(
@@ -190,44 +202,23 @@ impl StateHandle {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_entry_for_log_entry(&self, log: &Vertex) -> Result<Entry<RaftRequest>> {
+    async fn get_entries_for_log_segment(&self, log: &Vertex) -> Result<Vec<Entry<RaftRequest>>> {
         let transaction = self.get_dcr_transaction().await?;
 
         let prop = transaction
             .get_vertex_properties(VertexPropertyQuery::new(
                 SpecificVertexQuery::single(log.id).into(),
-                "log_entry",
+                "log_entries",
             ))
-            .map_err(|e| anyhow::anyhow!("Error fetching EntryPayload for vertex: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Error fetching entries for vertex: {}", e))?
             .pop()
-            .ok_or_else(|| anyhow::anyhow!("Vertex given does not have log_entry"))?;
+            .ok_or_else(|| anyhow::anyhow!("Vertex given does not have log_entries property"))?;
 
         Ok(serde_json::from_value(prop.value)?)
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_entry_payload_for_log_entry(
-        &self,
-        log: &Vertex,
-    ) -> Result<EntryPayload<RaftRequest>> {
-        let transaction = self.get_dcr_transaction().await?;
-
-        let prop = transaction
-            .get_vertex_properties(VertexPropertyQuery::new(
-                SpecificVertexQuery::single(log.id).into(),
-                "log_entry",
-            ))
-            .map_err(|e| anyhow::anyhow!("Error fetching EntryPayload for vertex: {}", e))?
-            .pop()
-            .ok_or_else(|| anyhow::anyhow!("Vertex given does not have log_entry"))?;
-
-        let entry: Entry<RaftRequest> = serde_json::from_value(prop.value)?;
-
-        Ok(entry.payload)
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_previous_log_entry(&self, log: &Vertex) -> Result<Option<Vertex>> {
+    async fn get_previous_log_segment(&self, log: &Vertex) -> Result<Option<Vertex>> {
         let transaction = self.get_dcr_transaction().await?;
 
         Ok(transaction
@@ -237,12 +228,12 @@ impl StateHandle {
                     .t(Type::new("following")?)
                     .outbound(),
             )
-            .map_err(|e| anyhow::anyhow!("Error fetching previous log entry"))?
+            .map_err(|e| anyhow::anyhow!("Error fetching previous log segment"))?
             .pop())
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_next_log_entry(&self, log: &Vertex) -> Result<Option<Vertex>> {
+    async fn get_next_log_segment(&self, log: &Vertex) -> Result<Option<Vertex>> {
         let transaction = self.get_dcr_transaction().await?;
 
         Ok(transaction
@@ -252,7 +243,7 @@ impl StateHandle {
                     .t(Type::new("followed_by")?)
                     .outbound(),
             )
-            .map_err(|e| anyhow::anyhow!("Error fetching next log entry"))?
+            .map_err(|e| anyhow::anyhow!("Error fetching next log segment"))?
             .pop())
     }
 }
@@ -270,7 +261,7 @@ impl std::fmt::Display for RaftStorageError {
 
 impl Error for RaftStorageError {}
 
-// FIXME: First time adding of essential vertices like HardState, LastLogTracker, and StateMachinei
+// FIXME: First time adding of essential vertices like HardState, LastLogTracker, and StateMachine
 // TODO: Cache the Uuids of these essential vertices
 #[async_trait]
 impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
@@ -279,44 +270,53 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
 
     #[tracing::instrument(skip(self))]
     async fn get_membership_config(&self) -> Result<MembershipConfig> {
-        let last = self.get_last_log_entry().await?;
+        // First check the in memory log
+        let log = self.get_tlr_handle().await?;
+        let log = log.read().await;
 
-        // If there is a last log entry, search in reverse to find the most recent membership config
-        // A snapshot pointer will also contain a membership config
-        if let Some(mut last) = last {
-            let mut membership_config = None;
+        let membership_config = if let Some(membership_config) =
+            log.values().rev().find_map(|entry| match &entry.payload {
+                EntryPayload::ConfigChange(cc) => Some(cc.membership.clone()),
+                EntryPayload::SnapshotPointer(sp) => Some(sp.membership.clone()),
+                _ => None,
+            }) {
+            membership_config
+        } else {
+            // Otherwise check the logs stored in the graph DB
+            let last = self.get_last_log_segment().await?;
 
-            while membership_config.is_none() {
-                match self.get_entry_payload_for_log_entry(&last).await? {
-                    EntryPayload::ConfigChange(cc) => {
-                        membership_config = Some(cc.membership.clone());
-                        break;
-                    }
-                    EntryPayload::SnapshotPointer(sp) => {
-                        membership_config = Some(sp.membership.clone());
-                        break;
-                    }
-                    _ => {
-                        last = self
-                            .get_previous_log_entry(&last)
-                            .await?
-                            .ok_or_else(|| anyhow::anyhow!("No previous log entry"))?;
-                        continue;
-                    }
+            // If there is a last log segment, search in reverse to find the most recent membership
+            // config
+            // A snapshot pointer will also contain a membership config
+            if let Some(mut last) = last {
+                let mut membership_config = None;
+
+                while membership_config.is_none() {
+                    let data = self.get_entries_for_log_entries(&last).await?;
+                    membership_config = data.iter().rev().find_map(|entry| match &entry.payload {
+                        EntryPayload::ConfigChange(cc) => Some(cc.membership.clone()),
+                        EntryPayload::SnapshotPointer(sp) => Some(sp.membership.clone()),
+                        _ => None,
+                    });
+
+                    // TODO: Error handling
+                    last = self.get_previous_log_segment(&last).await?.unwrap();
                 }
-            }
 
-            Ok(membership_config.unwrap())
-        }
-        // If there is no last log entry, return an initiall MembershipConfig
-        else {
-            Ok(MembershipConfig::new_initial(self.self_raft_id))
-        }
+                membership_config.unwrap()
+            }
+            // If there is no last log entry, return an initiall MembershipConfig
+            else {
+                MembershipConfig::new_initial(self.self_raft_id)
+            }
+        };
+
+        Ok(membership_config)
     }
 
     #[tracing::instrument(skip(self))]
     async fn get_initial_state(&self) -> Result<InitialState> {
-        let last = self.get_last_log_entry().await?;
+        let last = self.get_last_log_segment().await?;
 
         if let Some(mut last) = last {
             let mut membership = None;
@@ -324,30 +324,24 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
             let mut last_log_term = None;
 
             while membership.is_none() {
-                let entry = self.get_entry_for_log_entry(&last).await?;
+                let entry = self.get_entries_for_log_entries(&last).await?;
 
+                // TODO: Error handling
                 if last_log_index.is_none() {
-                    last_log_index = Some(entry.index);
-                    last_log_term = Some(entry.term);
+                    last_log_index = Some(entry.last().unwrap().index);
+                    last_log_term = Some(entry.last().unwrap().term);
                 }
 
-                match entry.payload {
-                    EntryPayload::ConfigChange(cc) => {
-                        membership = Some(cc.membership.clone());
-                        break;
-                    }
-                    EntryPayload::SnapshotPointer(sp) => {
-                        membership = Some(sp.membership.clone());
-                        break;
-                    }
-                    _ => {
-                        last = self
-                            .get_previous_log_entry(&last)
-                            .await?
-                            .ok_or_else(|| anyhow::anyhow!("No previous log entry"))?;
-                        continue;
-                    }
-                };
+                membership = entry.iter().rev().find_map(|entry| match entry.payload {
+                    EntryPayload::ConfigChange(cc) => Some(cc.membership.clone()),
+                    EntryPayload::SnapshotPointer(sp) => Some(sp.membership.clone()),
+                    _ => None,
+                });
+
+                last = self
+                    .get_previous_log_entry(&last)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("No previous log entry"))?;
             }
 
             let last_applied_log = self.get_last_applied_entry().await?;
@@ -392,30 +386,78 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
 
     #[tracing::instrument(skip(self))]
     async fn get_log_entries(&self, start: u64, stop: u64) -> Result<Vec<Entry<RaftRequest>>> {
-        let transaction = self.get_dcr_transaction().await?;
+        // First check the cache
+        let log = self.get_tlr_handle().await?;
+        let log = log.read().await;
 
-        let all_logs = transaction
-            .get_all_vertex_properties(RangeVertexQuery::new().t(Type::new("LogEntry")?))
-            .map_err(|e| anyhow::anyhow!("Error while fetching entries: {}", e))?;
+        // Note the min and max
+        let log_min = log.keys().next();
 
-        let mut filtered_logs = all_logs
-            .iter()
-            .filter_map(|vertex_properties| {
-                // TODO: Error handling
-                let log_entry = vertex_properties.props.pop()?;
-                let log_entry: Entry<RaftRequest> = serde_json::from_value(log_entry.value)
-                    .map_err(|e| anyhow::anyhow!("Error deserializing log entries: {}", e))
-                    .unwrap();
-                if log_entry.index >= start && log_entry.index < stop {
-                    Some(log_entry)
-                } else {
-                    None
+        Ok(match log_min {
+            Some(min) if min <= &start => log
+                .iter()
+                .filter_map(|(k, v)| {
+                    if k >= &start && k < &stop {
+                        Some(v.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+
+            _ => {
+                let transaction = self.get_dcr_transaction().await?;
+                let mut log_segment = None;
+
+                let mut segment_min: Option<u64> = None;
+
+                while segment_min.is_none() || segment_min.unwrap() > start {
+                    log_segment = if let Some(log_segment) = log_segment {
+                        self.get_previous_log_segment(&log_segment).await?
+                    } else {
+                        self.get_last_log_segment().await?
+                    };
+
+                    let segment_data = self
+                        .get_entries_for_log_segment(&log_segment.unwrap())
+                        .await?;
+                    let segment_min = segment_data.first();
                 }
-            })
-            .collect::<Vec<Entry<RaftRequest>>>();
 
-        filtered_logs.sort_by(|&first, &second| first.index.partial_cmp(&second.index).unwrap());
-        Ok(filtered_logs)
+                // log_segment now contains the start point
+                let mut segment_max: Option<u64> = None;
+                let mut out = Vec::new();
+
+                while segment_max.is_none() || segment_max.unwrap() < stop {
+                    let segment_data = self
+                        .get_entries_for_log_segment(&log_segment.unwrap())
+                        .await?;
+                    segment_max = segment_data.last().map(|e| e.index);
+                    for data in segment_data {
+                        if data.index >= start && data.index < stop {
+                            out.push(data.clone())
+                        }
+                    }
+
+                    if segment_max.unwrap() < stop {
+                        log_segment = self.get_next_log_segment(&log_segment.unwrap()).await?;
+
+                        // If the log_segment is None, then the mx must be in the cache
+                        if log_segment.is_none() {
+                            for (k, v) in log.iter() {
+                                if k >= &start && k < &stop {
+                                    out.push(v.clone())
+                                }
+                            }
+
+                            break;
+                        }
+                    }
+                }
+
+                out
+            }
+        })
     }
 
     #[tracing::instrument(skip(self))]
@@ -584,7 +626,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
             }
             (None, None) => {
                 // In this case do nothing
-                // Or delete the LastLogTracker's points_to edge? TODO: Findo out if edges are
+                // Or delete the LastLogTracker's points_to edge? TODO: Find out if edges are
                 // deleted with vertices
             }
         };
@@ -604,7 +646,9 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn append_entry_to_log(&self, entry: &Entry<RaftRequest>) -> Result<()> {}
+    async fn append_entry_to_log(&self, entry: &Entry<RaftRequest>) -> Result<()> {
+        // Must change StateMachine and LastLogTracker
+    }
 
     #[tracing::instrument(skip(self))]
     async fn replicate_to_log(&self, entries: &[Entry<RaftRequest>]) -> Result<()> {}
@@ -644,6 +688,10 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
 pub struct StateManager {
     self_raft_id: u64,
 
+    temporary_log: Arc<RwLock<BTreeMap<u64, Entry<RaftRequest>>>>,
+    temporary_log_request_receiver:
+        mpsc::Receiver<oneshot::Sender<Arc<RwLock<BTreeMap<u64, Entry<RaftRequest>>>>>>,
+
     distributed_conf: RocksdbDatastore,
     distributed_conf_request_receiver: mpsc::Receiver<oneshot::Sender<RocksdbTransaction>>,
     distributed_conf_sync_request_receiver: mpsc::Receiver<()>,
@@ -654,6 +702,7 @@ pub struct StateManager {
     shutdown_request_receiver: mpsc::Receiver<()>,
 
     // The senders to be cloned when spawning a StateHandle
+    tlr_sender: mpsc::Sender<oneshot::Sender<Arc<RwLock<BTreeMap<u64, Entry<RaftRequest>>>>>>,
     dcr_sender: mpsc::Sender<oneshot::Sender<RocksdbTransaction>>,
     dcs_sender: mpsc::Sender<()>,
     tsr_sender: mpsc::Sender<oneshot::Sender<MemoryTransaction>>,
@@ -667,11 +716,12 @@ impl StateManager {
         distributed_path: PathBuf,
         temporary_path: PathBuf,
     ) -> Result<StateManager> {
+        let temporary_log = Arc::new(RwLock::from(BTreeMap::new()));
         let distributed_conf = indradb::RocksdbDatastore::new(distributed_path, None)
             .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-
         let temporary_state = indradb::MemoryDatastore::create(temporary_path)?;
 
+        let (tlr_sender, temporary_log_request_receiver) = mpsc::channel(128);
         let (dcr_sender, distributed_conf_request_receiver) = mpsc::channel(128);
         let (dcs_sender, distributed_conf_sync_request_receiver) = mpsc::channel(128);
         let (tsr_sender, temporary_state_request_receiver) = mpsc::channel(128);
@@ -679,12 +729,15 @@ impl StateManager {
 
         Ok(StateManager {
             self_raft_id,
+            temporary_log,
+            temporary_log_request_receiver,
             distributed_conf,
             distributed_conf_request_receiver,
             distributed_conf_sync_request_receiver,
             temporary_state,
             temporary_state_request_receiver,
             shutdown_request_receiver,
+            tlr_sender,
             dcr_sender,
             dcs_sender,
             tsr_sender,
@@ -700,6 +753,7 @@ impl StateManager {
             dcr_sync_sender: self.dcs_sender.clone(),
             tsr_sender: self.tsr_sender.clone(),
             sdr_sender: self.sdr_sender.clone(),
+            tlr_sender: self.tlr_sender.clone(),
         }
     }
 
