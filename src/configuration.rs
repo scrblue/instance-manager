@@ -19,17 +19,10 @@ pub struct LocalConfig {
     pub server_private_key: PathBuf,
     pub server_key_password: Option<String>,
 
-    pub instance_store_overrides: HashMap<String, InstanceConfOverrides>,
-
     pub cache_file_path: PathBuf,
     pub shared_conf_db_path: PathBuf,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct InstanceConfOverrides {
-    pub start_program: Option<String>,
-    pub with_args: Option<Option<Vec<String>>>,
-    pub install_method: Option<InstanceInstallMethod>,
+	pub log_file_path: PathBuf,
+	pub snapshot_save_dir: PathBuf,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

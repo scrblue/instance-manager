@@ -14,7 +14,7 @@ mod io;
 mod messages;
 mod peers;
 use peers::peer_tracker;
-mod state_manager;
+mod state;
 mod tls;
 
 use connection_manager::ConnectionManagerToMain as FromConnectionManager;
@@ -45,14 +45,14 @@ async fn main() -> Result<()> {
         &local_conf.server_private_key,
     )
     .await?;
-
     let server_conf = Arc::new(server_conf);
     let client_conf = Arc::new(client_conf);
 
     // Create a SocketAddr type from the local configuration
     let listener_socket_addr = SocketAddr::from((local_conf.public_ip, local_conf.port_bound));
 
-    // Filter the global list of peers so that the address of this manager is not included
+    // Filter the global list of peers so that the address of this manager is not included and to
+    // find the Raft ID of this instacne
     let mut self_id = None;
     let peers = core_conf
         .peers
@@ -69,10 +69,12 @@ async fn main() -> Result<()> {
         .collect::<Vec<_>>();
 
     // The state manager controls the databases and the handle is an abstraction for queries to it
-    let state_manager = state_manager::StateManager::new(
+    let state_manager = state::manager::StateManager::new(
         self_id.unwrap(),
         local_conf.shared_conf_db_path,
         local_conf.cache_file_path,
+        local_conf.log_file_path,
+        local_conf.snapshot_save_dir,
     )?;
     let state_handle = state_manager.handle();
     tokio::spawn(state_manager.run());

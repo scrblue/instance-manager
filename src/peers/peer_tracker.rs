@@ -1,7 +1,7 @@
 use super::peer_connection;
 use crate::{
     messages::{ManagerManagerRequest, ManagerManagerResponse, RaftRequest},
-    state_manager::StateHandle,
+    state::handle::StateHandle,
 };
 
 use anyhow::{Context, Result};
