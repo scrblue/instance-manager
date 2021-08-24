@@ -72,7 +72,6 @@ async fn main() -> Result<()> {
     let state_manager = state::manager::StateManager::new(
         self_id.unwrap(),
         local_conf.shared_conf_db_path,
-        local_conf.cache_file_path,
         local_conf.log_file_path,
         local_conf.snapshot_save_dir,
     )?;

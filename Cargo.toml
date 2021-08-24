@@ -42,6 +42,7 @@ rocksdb = "0.16.0"
 indradb-lib = { version = "2.1.0", features = ["rocksdb-datastore"] }
 
 # Other
+chrono = "0.4.19"
 rand = "0.8.4"
 uuid = "0.8.2"
 

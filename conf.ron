@@ -12,7 +12,6 @@
 	server_private_key: "../tls/root/root_private.der",
 	server_key_password: "test",
 	
-	cache_file_path: "./test1",
 	shared_conf_db_path: "./test1_conf.db",
 	log_file_path: "./test1_log.db",
 	snapshot_save_dir: "./"

@@ -12,8 +12,11 @@ use indradb::{
 };
 use rocksdb::DB;
 use serde_json::{value, Value};
-use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
-use tokio::sync::{mpsc, oneshot, RwLock};
+use std::{collections::HashMap, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::{mpsc, oneshot, RwLock},
+};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -21,13 +24,10 @@ pub struct StateHandle {
     // Raft log DB handle request
     rlr_sender: mpsc::Sender<oneshot::Sender<Arc<RwLock<DB>>>>,
 
-    // Distributed configuration Transaction request
-    dcr_sender: mpsc::Sender<oneshot::Sender<RocksdbTransaction>>,
+    // Distributed state Transaction request
+    dsr_sender: mpsc::Sender<oneshot::Sender<RocksdbTransaction>>,
     // Distributed configuration sync request
-    dcr_sync_sender: mpsc::Sender<()>,
-
-    // Temporary state Transaction request
-    tsr_sender: mpsc::Sender<oneshot::Sender<MemoryTransaction>>,
+    dsr_sync_sender: mpsc::Sender<()>,
 
     // Shutdown request
     sdr_sender: mpsc::Sender<()>,
@@ -49,7 +49,7 @@ impl StateHandle {
 
         // Fetch a MemoryTransaction
         let (send, recv) = oneshot::channel();
-        self.tsr_sender.send(send).await?;
+        self.dsr_sender.send(send).await?;
         let transaction = recv.await?;
 
         // The existing InstanceManager instances must be fetched so that they can be made each
@@ -133,9 +133,9 @@ impl StateHandle {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_dcr_transaction(&self) -> Result<RocksdbTransaction> {
+    async fn get_dsr_transaction(&self) -> Result<RocksdbTransaction> {
         let (tx, rx) = oneshot::channel();
-        self.dcr_sender.send(tx).await?;
+        self.dsr_sender.send(tx).await?;
 
         Ok(rx.await?)
     }
@@ -148,16 +148,9 @@ impl StateHandle {
         Ok(rx.await?)
     }
 
-    async fn get_tsr_transaction(&self) -> Result<MemoryTransaction> {
-        let (tx, rx) = oneshot::channel();
-        self.tsr_sender.send(tx).await?;
-
-        Ok(rx.await?)
-    }
-
     #[tracing::instrument(skip(self))]
     async fn get_hard_state(&self) -> Result<Option<HardState>> {
-        let transaction = self.get_dcr_transaction().await?;
+        let transaction = self.get_dsr_transaction().await?;
 
         let json = transaction
             .get_vertex_properties(VertexPropertyQuery::new(
@@ -180,7 +173,7 @@ impl StateHandle {
 
     #[tracing::instrument(skip(self))]
     async fn get_last_applied_entry(&self) -> Result<Option<u64>> {
-        let transaction = self.get_dcr_transaction().await?;
+        let transaction = self.get_dsr_transaction().await?;
 
         let json = transaction
             .get_vertex_properties(VertexPropertyQuery::new(
@@ -199,67 +192,6 @@ impl StateHandle {
         } else {
             Ok(None)
         }
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_last_log_segment(&self) -> Result<Option<Vertex>> {
-        let transaction = self.get_dcr_transaction().await?;
-        Ok(transaction
-            .get_vertices(
-                RangeVertexQuery::new()
-                    .limit(1)
-                    .t(indradb::Type::new("LastLogTracker")?)
-                    .outbound()
-                    .outbound(),
-            )
-            .map_err(|e| anyhow::anyhow!("Error fetching pointer to last log entry"))?
-            .pop())
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_entries_for_log_segment(&self, log: &Vertex) -> Result<Vec<Entry<RaftRequest>>> {
-        let transaction = self.get_dcr_transaction().await?;
-
-        let prop = transaction
-            .get_vertex_properties(VertexPropertyQuery::new(
-                SpecificVertexQuery::single(log.id).into(),
-                "log_entries",
-            ))
-            .map_err(|e| anyhow::anyhow!("Error fetching entries for vertex: {}", e))?
-            .pop()
-            .ok_or_else(|| anyhow::anyhow!("Vertex given does not have log_entries property"))?;
-
-        Ok(serde_json::from_value(prop.value)?)
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_previous_log_segment(&self, log: &Vertex) -> Result<Option<Vertex>> {
-        let transaction = self.get_dcr_transaction().await?;
-
-        Ok(transaction
-            .get_vertices(
-                SpecificVertexQuery::single(log.id)
-                    .outbound()
-                    .t(Type::new("following")?)
-                    .outbound(),
-            )
-            .map_err(|e| anyhow::anyhow!("Error fetching previous log segment"))?
-            .pop())
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_next_log_segment(&self, log: &Vertex) -> Result<Option<Vertex>> {
-        let transaction = self.get_dcr_transaction().await?;
-
-        Ok(transaction
-            .get_vertices(
-                SpecificVertexQuery::single(log.id)
-                    .outbound()
-                    .t(Type::new("followed_by")?)
-                    .outbound(),
-            )
-            .map_err(|e| anyhow::anyhow!("Error fetching next log segment"))?
-            .pop())
     }
 }
 
@@ -360,7 +292,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
 
     #[tracing::instrument(skip(self))]
     async fn save_hard_state(&self, hs: &HardState) -> Result<()> {
-        let transaction = self.get_dcr_transaction().await?;
+        let transaction = self.get_dsr_transaction().await?;
 
         transaction
             .set_vertex_properties(
@@ -375,7 +307,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
             )
             .map_err(|e| anyhow::anyhow!("Error saving HardState: {}", e))?;
 
-        self.dcr_sync_sender.send(()).await.map_err(|e| {
+        self.dsr_sync_sender.send(()).await.map_err(|e| {
             anyhow::anyhow!(
                 "Error sending sync state request while saving HardState: {}",
                 e
@@ -426,10 +358,10 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
 
     #[tracing::instrument(skip(self))]
     async fn replicate_to_log(&self, entries: &[Entry<RaftRequest>]) -> Result<()> {
-		for entry in entries {
-    		self.append_entry_to_log(entry).await?;
-		}
-		
+        for entry in entries {
+            self.append_entry_to_log(entry).await?;
+        }
+
         Ok(())
     }
 
@@ -525,32 +457,80 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
 
     #[tracing::instrument(skip(self))]
     async fn do_log_compaction(&self) -> Result<CurrentSnapshotData<Self::Snapshot>> {
-        let log = self.get_tlr_handle().await?;
-        let log = log.read().await;
+        let handle = self.get_rlr_handle().await?;
+        let log = handle.read().await;
 
         let index = self.get_last_applied_entry().await?.unwrap_or(0);
         let membership = self.get_membership_config().await?;
-        let term = if let Some(term) =
-            log.iter()
-                .rev()
-                .find_map(|(k, v)| if &index == k { Some(v.term) } else { None })
-        {
-            term
-        } else {
-            // FIXME: Search through logs in disk too
-            0
-        };
+        let entry = log
+            .get(&index.to_le_bytes())
+            .map_err(|e| anyhow::anyhow!("Error fetching last applied entry: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("No key with last applied entry's index"))?;
+        let entry = bincode::deserialize::<Entry<RaftRequest>>(entry.as_ref())?;
+        let term = entry.term;
 
         let snapshot = {
             // Read from temporary state and distributed conf, write to file
             // Insert snapshot pointer into distributed conf
-            Box::new(
-                tokio::fs::File::create(format!(
-                    "{}-{}-{}.complog",
-                    self.self_raft_id, term, index
-                ))
-                .await?,
-            )
+            let mut file = tokio::fs::File::create(format!(
+                "{}--{}.complog",
+                self.self_raft_id,
+                chrono::Utc::now().format("%Y%m%d%H%M%S"),
+            ))
+            .await?;
+
+            let transaction = self.get_dsr_transaction().await?;
+            let all_vertices_query = RangeVertexQuery::new().limit(u32::MAX);
+            let all_vertices_and_properties = transaction
+                .get_all_vertex_properties(all_vertices_query.clone())
+                .map_err(|e| anyhow::anyhow!("Error fetching all verticies for log compaction"))?;
+
+            let mut snapshot_vertices = Vec::new();
+            let mut snapshot_edges = Vec::new();
+
+            for vertex_and_properties in all_vertices_and_properties {
+                snapshot_vertices.push(SnapshotVertex {
+                    id: vertex_and_properties.vertex.id,
+                    t: vertex_and_properties.vertex.t,
+                    properties: vertex_and_properties
+                        .props
+                        .iter()
+                        .map(|np| (np.name, np.value))
+                        .collect(),
+                });
+
+                let outbound_edges_query =
+                    SpecificVertexQuery::single(vertex_and_properties.vertex.id).outbound();
+
+                let outbound_edges_and_properties = transaction
+                    .get_all_edge_properties(outbound_edges_query)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Error fetching outbound edges for {}: {}",
+                            vertex_and_properties.vertex.id,
+                            e
+                        )
+                    })?;
+
+                for edge_and_properties in outbound_edges_and_properties {
+                    snapshot_edges.push(SnapshotEdge {
+                        key: edge_and_properties.edge.key,
+                        created_datetime: edge_and_properties.edge.created_datetime,
+                        properties: edge_and_properties
+                            .props
+                            .iter()
+                            .map(|np| (np.name, np.value))
+                            .collect(),
+                    });
+                }
+            }
+
+            file.write_all(&bincode::serialize(&SnapshotFile {
+                vertices: snapshot_vertices,
+                edges: snapshot_edges,
+            })?);
+
+            Box::new(file)
         };
 
         Ok(CurrentSnapshotData {
@@ -577,4 +557,24 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateHandle {
 
     #[tracing::instrument(skip(self))]
     async fn get_current_snapshot(&self) -> Result<Option<CurrentSnapshotData<Self::Snapshot>>> {}
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SnapshotFile {
+    vertices: Vec<SnapshotVertex>,
+    edges: Vec<SnapshotEdge>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SnapshotVertex {
+    id: Uuid,
+    t: Type,
+    properties: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SnapshotEdge {
+    key: EdgeKey,
+    created_datetime: chrono::DateTime<chrono::Utc>,
+    properties: HashMap<String, serde_json::Value>,
 }

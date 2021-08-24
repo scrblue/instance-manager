@@ -19,7 +19,6 @@ pub struct LocalConfig {
     pub server_private_key: PathBuf,
     pub server_key_password: Option<String>,
 
-    pub cache_file_path: PathBuf,
     pub shared_conf_db_path: PathBuf,
 	pub log_file_path: PathBuf,
 	pub snapshot_save_dir: PathBuf,
