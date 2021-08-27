@@ -15,12 +15,7 @@ use indradb::{
 };
 use rocksdb::DB;
 use serde_json::{value, Value};
-use std::{
-    collections::hash_map::HashMap,
-    error::Error,
-    net::SocketAddr,
-    path::PathBuf,
-};
+use std::{collections::hash_map::HashMap, error::Error, net::SocketAddr, path::PathBuf};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -380,11 +375,12 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
         tracing::trace!("Entering do_log_compaction");
         let log = &self.raft_log_db;
 
-        let file_name = format!(
+        let mut file_name = self.snapshot_dir.clone();
+        file_name.push(format!(
             "{}--{}.complog",
             self.self_raft_id,
-            chrono::Utc::now().format("%Y%m%d%H%M%S"),
-        );
+            chrono::Utc::now().format("%Y%m%d%H%M%S")
+        ));
 
         let index = self.get_last_applied_entry().await?.unwrap_or(0);
 
@@ -485,7 +481,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
         self.append_entry_to_log(&Entry::new_snapshot_pointer(
             index,
             term,
-            file_name,
+            file_name.as_os_str().to_str().unwrap().to_owned(),
             membership.clone(),
         ))
         .await?;
@@ -573,6 +569,8 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
         })?;
 
         self.delete_logs_from(0, delete_through).await?;
+
+        // FIXME: Update StateMachine and HardState
 
         Ok(())
     }

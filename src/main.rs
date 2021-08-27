@@ -75,8 +75,8 @@ async fn main() -> Result<()> {
         local_conf.log_file_path,
         local_conf.snapshot_save_dir,
     )?;
-	// TODO: Get Raft thread going here
-	
+    // TODO: Get Raft thread going here
+
     // Spawn IO thread
     let (io_s, mut io_r) = mpsc::channel::<FromIo>(128);
     tokio::spawn(io::handle_io(io_s));

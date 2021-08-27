@@ -1,7 +1,5 @@
 use super::peer_connection;
-use crate::{
-    messages::{ManagerManagerRequest, ManagerManagerResponse, RaftRequest},
-};
+use crate::messages::{ManagerManagerRequest, ManagerManagerResponse, RaftRequest};
 
 use anyhow::{Context, Result};
 use async_raft::{async_trait::async_trait, network::RaftNetwork, raft::*, NodeId};

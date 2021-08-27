@@ -50,3 +50,6 @@ uuid = "0.8.2"
 path = "../common_model/"
 default-features = false
 features = ["instance_manager"]
+
+[dev-dependencies]
+tempdir = "0.3.7"
