@@ -69,15 +69,14 @@ async fn main() -> Result<()> {
         .collect::<Vec<_>>();
 
     // The state manager controls the databases and the handle is an abstraction for queries to it
-    let state_manager = state::manager::StateManager::new(
+    let state_manager = state::StateManager::new(
         self_id.unwrap(),
         local_conf.shared_conf_db_path,
         local_conf.log_file_path,
         local_conf.snapshot_save_dir,
     )?;
-    let state_handle = state_manager.handle();
-    tokio::spawn(state_manager.run());
-
+	// TODO: Get Raft thread going here
+	
     // Spawn IO thread
     let (io_s, mut io_r) = mpsc::channel::<FromIo>(128);
     tokio::spawn(io::handle_io(io_s));
@@ -100,18 +99,8 @@ async fn main() -> Result<()> {
         peers,
     ));
 
-    // Insert self into graph of running instances
-    let _self_uuid = state_handle
-        .add_peer(
-            self_id.ok_or(anyhow::anyhow!(
-                "This InstanceManager is not a part of the shared configuration"
-            ))?,
-            listener_socket_addr,
-        )
-        .await?;
-
     // Spawn peer tracking thread
-    let peer_tracker = peer_tracker::PeerTacker::new(state_handle.clone());
+    let peer_tracker = peer_tracker::PeerTacker::new();
     let peer_tracker_handle = peer_tracker.handle();
     tokio::spawn(peer_tracker.run());
 
@@ -154,7 +143,6 @@ async fn main() -> Result<()> {
         .await?;
 
     peer_tracker_handle.shutdown().await?;
-    state_handle.shutdown().await?;
 
     // FIXME: IO shutdown
 

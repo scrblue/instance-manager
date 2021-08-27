@@ -1,7 +1,6 @@
 use super::peer_connection;
 use crate::{
     messages::{ManagerManagerRequest, ManagerManagerResponse, RaftRequest},
-    state::handle::StateHandle,
 };
 
 use anyhow::{Context, Result};
@@ -143,9 +142,6 @@ pub struct PeerTacker {
     request_receiver: mpsc::Receiver<(Request, oneshot::Sender<Response>)>,
     shutdown_request_receiver: mpsc::Receiver<()>,
 
-    // The state handle is needed for inserting peers into to state
-    state_handle: StateHandle,
-
     // TODO: raft_handle: RaftHandle,
 
     // Peer connections message Senders and JoinHandles
@@ -161,8 +157,8 @@ pub struct PeerTacker {
 }
 
 impl PeerTacker {
-    #[tracing::instrument(skip(state_handle))]
-    pub fn new(state_handle: StateHandle) -> PeerTacker {
+    #[tracing::instrument]
+    pub fn new() -> PeerTacker {
         let (request_sender, request_receiver) = mpsc::channel(128);
         let (sdr_sender, shutdown_request_receiver) = mpsc::channel(1);
         let peer_handles = HashMap::new();
@@ -171,7 +167,6 @@ impl PeerTacker {
         PeerTacker {
             request_receiver,
             shutdown_request_receiver,
-            state_handle,
             peer_handles,
             to_tracker_master,
             from_peers,
@@ -209,11 +204,6 @@ impl PeerTacker {
                     match msg {
                         Some((Request::NewPeer(id, socket_addr, connection), tx)) => {
                             let (sender, receiver) = mpsc::channel::<ToConnection>(128);
-
-                            if let Err(e) = self.state_handle.add_peer(id, socket_addr).await {
-                                tracing::error!("For NewPeer message with raft_id {}: {}", id, e);
-                                continue
-                            };
 
                             self.peer_handles.insert(id, (
                                 tokio::spawn(peer_connection::handle_peer_connection(
