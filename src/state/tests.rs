@@ -12,7 +12,10 @@ fn get_state_manager() -> (StateManager, TempDir) {
     let mut log_path: PathBuf = dir.path().into();
     log_path.push("log");
 
-    (StateManager::new(0, dist_path, log_path, dir.path().into()).unwrap(), dir)
+    (
+        StateManager::new(0, dist_path, log_path, dir.path().into()).unwrap(),
+        dir,
+    )
 }
 
 #[test]
@@ -168,14 +171,14 @@ async fn get_initial_state_cc_test() {
         members_after_consensus: None,
     };
     let hs = HardState {
-		current_term: 1,
-		voted_for: None,
+        current_term: 1,
+        voted_for: None,
     };
-	
+
     let transaction = sm.distributed_state.transaction().unwrap();
     assert_eq!(transaction.get_vertex_count().unwrap(), 1);
 
-	sm.save_hard_state(&hs).await.unwrap();
+    sm.save_hard_state(&hs).await.unwrap();
 
     sm.raft_log_db
         .put(
@@ -198,4 +201,34 @@ async fn get_initial_state_cc_test() {
     assert_eq!(0, is_actual.last_applied_log);
     assert_eq!(hs, is_actual.hard_state);
     assert_eq!(mc, is_actual.membership);
+}
+
+// save_hard_state tests
+
+#[tokio::test]
+async fn save_hard_state_test() {
+    let (sm, _dir) = get_state_manager();
+
+    // Test initial
+    let hs_expexcted = HardState {
+        current_term: 0,
+        voted_for: None,
+    };
+    assert_eq!(hs_expexcted, sm.get_hard_state().await.unwrap());
+
+	// Save 1
+    let hs_expexcted = HardState {
+        current_term: 1,
+        voted_for: None,
+    };
+	sm.save_hard_state(&hs_expexcted).await.unwrap();
+    assert_eq!(hs_expexcted, sm.get_hard_state().await.unwrap());
+    
+	// Save 2
+    let hs_expexcted = HardState {
+        current_term: 2,
+        voted_for: Some(1),
+    };
+	sm.save_hard_state(&hs_expexcted).await.unwrap();
+    assert_eq!(hs_expexcted, sm.get_hard_state().await.unwrap());
 }
