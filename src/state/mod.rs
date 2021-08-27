@@ -38,6 +38,7 @@ pub struct StateManager {
     snapshot_dir: PathBuf,
     raft_log_db: DB,
     distributed_state: RocksdbDatastore,
+    state_machine_uuid: Uuid,
 }
 
 impl StateManager {
@@ -52,16 +53,39 @@ impl StateManager {
         let distributed_state = indradb::RocksdbDatastore::new(distributed_path, None)
             .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
+        let transaction = distributed_state
+            .transaction()
+            .map_err(|e| anyhow::anyhow!("Error getting Transaction: {}", e))?;
+
+        let sm_type = Type::new("StateMachine")?;
+
+        let mut vertex = transaction
+            .get_vertices(RangeVertexQuery::new().limit(1).t(sm_type.clone()))
+            .map_err(|e| anyhow::anyhow!("Error checking for StateMachine: {}", e))?;
+
+        let state_machine_uuid = if let Some(vertex) = vertex.pop() {
+            vertex.id
+        } else {
+            transaction
+                .create_vertex_from_type(sm_type)
+                .map_err(|e| anyhow::anyhow!("Error creating StateMachine in DB: {}", e))?
+        };
+
+        distributed_state
+            .sync()
+            .map_err(|e| anyhow::anyhow!("Error syncing DB while creating StateManager: {}", e))?;
+
         Ok(StateManager {
             self_raft_id,
             raft_log_db,
             distributed_state,
             snapshot_dir,
+            state_machine_uuid,
         })
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_hard_state(&self) -> Result<Option<HardState>> {
+    async fn get_hard_state(&self) -> Result<HardState> {
         let transaction = self
             .distributed_state
             .transaction()
@@ -71,23 +95,26 @@ impl StateManager {
             .get_vertex_properties(VertexPropertyQuery::new(
                 RangeVertexQuery::new()
                     .limit(1)
-                    .t(Type::new("HardState")?)
+                    .t(Type::new("StateMachine")?)
                     .into(),
                 "hard_state",
             ))
-            .map_err(|e| anyhow::anyhow!("Error fetching HardState: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Error fetching StateMachine: {}", e))?
             .pop();
 
         if let Some(json) = json {
             let parsed = serde_json::from_value(json.value)?;
             Ok(parsed)
         } else {
-            Ok(None)
+            Ok(HardState {
+                current_term: 0,
+                voted_for: None,
+            })
         }
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_last_applied_entry(&self) -> Result<Option<u64>> {
+    async fn get_last_applied_entry(&self) -> Result<u64> {
         let transaction = self
             .distributed_state
             .transaction()
@@ -108,7 +135,7 @@ impl StateManager {
             let parsed = serde_json::from_value(json.value)?;
             Ok(parsed)
         } else {
-            Ok(None)
+            Ok(0)
         }
     }
 }
@@ -157,7 +184,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
         let mut last_log_index = None;
         let mut last_log_term = None;
 
-        for (key, value) in log.iterator(rocksdb::IteratorMode::End) {
+        for (_key, value) in log.iterator(rocksdb::IteratorMode::End) {
             let entry = bincode::deserialize::<Entry<RaftRequest>>(value.as_ref())
                 .map(|entry| Some(entry))
                 .unwrap_or(None);
@@ -190,8 +217,8 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
             Ok(InitialState {
                 last_log_index: last_log_index.unwrap(),
                 last_log_term: last_log_term.unwrap(),
-                last_applied_log: last_applied_log.unwrap(),
-                hard_state: hard_state.unwrap(),
+                last_applied_log,
+                hard_state,
                 membership: membership.unwrap(),
             })
         }
@@ -211,7 +238,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
                 VertexPropertyQuery::new(
                     RangeVertexQuery::new()
                         .limit(1)
-                        .t(Type::new("HardState")?)
+                        .t(Type::new("StateMachine")?)
                         .into(),
                     "hard_state",
                 ),
@@ -231,16 +258,25 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
         tracing::trace!("Entering get_log_entries");
         let log = &self.raft_log_db;
 
-        log.iterator(rocksdb::IteratorMode::From(
+        let mut requests = Vec::new();
+
+        for (key, value) in log.iterator(rocksdb::IteratorMode::From(
             &start.to_le_bytes(),
             rocksdb::Direction::Forward,
-        ))
-        .map(|(key, value)| {
-            bincode::deserialize::<Entry<RaftRequest>>(value.as_ref()).map_err(|e| {
-                anyhow::anyhow!("Error deserializing log DB for key {:x?}: {}", key, e)
-            })
-        })
-        .collect::<Result<Vec<Entry<RaftRequest>>>>()
+        )) {
+            requests.push(
+                bincode::deserialize::<Entry<RaftRequest>>(value.as_ref()).map_err(|e| {
+                    anyhow::anyhow!("Error deserializing log DB for key {:x?}: {}", key, e)
+                })?,
+            );
+
+			// TODO: Find a more elegant way to do this :)
+            if requests.last().unwrap().index == stop - 1 {
+				break
+            }
+        }
+
+        Ok(requests)
     }
 
     #[tracing::instrument(skip(self))]
@@ -382,7 +418,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
             chrono::Utc::now().format("%Y%m%d%H%M%S")
         ));
 
-        let index = self.get_last_applied_entry().await?.unwrap_or(0);
+        let index = self.get_last_applied_entry().await?;
 
         let membership = log
             .iterator(rocksdb::IteratorMode::From(
