@@ -203,7 +203,7 @@ async fn get_initial_state_cc_test() {
     assert_eq!(mc, is_actual.membership);
 }
 
-// save_hard_state tests
+// save_hard_state test
 
 #[tokio::test]
 async fn save_hard_state_test() {
@@ -216,19 +216,74 @@ async fn save_hard_state_test() {
     };
     assert_eq!(hs_expexcted, sm.get_hard_state().await.unwrap());
 
-	// Save 1
+    // Save 1
     let hs_expexcted = HardState {
         current_term: 1,
         voted_for: None,
     };
-	sm.save_hard_state(&hs_expexcted).await.unwrap();
+    sm.save_hard_state(&hs_expexcted).await.unwrap();
     assert_eq!(hs_expexcted, sm.get_hard_state().await.unwrap());
-    
-	// Save 2
+
+    // Save 2
     let hs_expexcted = HardState {
         current_term: 2,
         voted_for: Some(1),
     };
-	sm.save_hard_state(&hs_expexcted).await.unwrap();
+    sm.save_hard_state(&hs_expexcted).await.unwrap();
     assert_eq!(hs_expexcted, sm.get_hard_state().await.unwrap());
+}
+
+// get_log_entries, delete_logs_from, append_entry_to_log, and replicate_to_log test
+
+#[tokio::test]
+async fn log_operations_test() {
+    let (sm, _dir) = get_state_manager();
+
+    let le1 = Entry {
+        term: 1,
+        index: 1,
+        payload: EntryPayload::Normal(EntryNormal {
+            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(0)),
+        }),
+    };
+    let le2 = Entry {
+        term: 1,
+        index: 2,
+        payload: EntryPayload::Normal(EntryNormal {
+            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(1)),
+        }),
+    };
+    let le3 = Entry {
+        term: 1,
+        index: 3,
+        payload: EntryPayload::Normal(EntryNormal {
+            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(2)),
+        }),
+    };
+
+    assert_eq!(sm.get_log_entries(1, 4).await.unwrap().len(), 0);
+
+    sm.append_entry_to_log(&le1).await.unwrap();
+    let les = sm.get_log_entries(1, 4).await.unwrap();
+    assert_eq!(les.len(), 1);
+    assert_eq!(les[0], le1);
+
+    let les_expected = [le1, le2, le3];
+    sm.replicate_to_log(&les_expected[1..]).await.unwrap();
+    let les = sm.get_log_entries(1, 4).await.unwrap();
+    assert_eq!(les.as_slice(), les_expected);
+
+    let les = sm.get_log_entries(1, 3).await.unwrap();
+    assert_eq!(les.as_slice(), &les_expected[..2]);
+
+    let les = sm.get_log_entries(2, 3).await.unwrap();
+    assert_eq!(les.as_slice(), &les_expected[1..2]);
+
+    sm.delete_logs_from(3, Some(4)).await.unwrap();
+    let les = sm.get_log_entries(1, 4).await.unwrap();
+    assert_eq!(les.as_slice(), &les_expected[0..2]);
+
+    sm.delete_logs_from(1, None).await.unwrap();
+    let les = sm.get_log_entries(1, 4).await.unwrap();
+    assert_eq!(les.len(), 0);
 }

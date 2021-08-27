@@ -15,7 +15,9 @@ use indradb::{
 };
 use rocksdb::DB;
 use serde_json::{value, Value};
-use std::{collections::hash_map::HashMap, error::Error, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::hash_map::HashMap, convert::TryInto, error::Error, net::SocketAddr, path::PathBuf,
+};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -49,7 +51,8 @@ impl StateManager {
         log_path: PathBuf,
         snapshot_dir: PathBuf,
     ) -> Result<StateManager> {
-        let raft_log_db = DB::open_default(log_path)?;
+        let mut raft_log_db = DB::open_default(log_path)?;
+
         let distributed_state = indradb::RocksdbDatastore::new(distributed_path, None)
             .map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
@@ -270,9 +273,13 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
                 })?,
             );
 
-			// TODO: Find a more elegant way to do this :)
-            if requests.last().unwrap().index == stop - 1 {
-				break
+            // TODO: Find a more elegant way to do this :)
+            if let Some(request) = requests.last() {
+                if request.index == stop - 1 {
+                    break;
+                }
+            } else {
+                break;
             }
         }
 
@@ -284,11 +291,19 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
         tracing::trace!("Entering delete_logs_from");
         let log = &self.raft_log_db;
 
-        log.delete_range_cf(
-            log.cf_handle("default").unwrap(),
-            &start.to_le_bytes(),
-            &stop.unwrap_or(u64::MAX).to_le_bytes(),
-        )?;
+        // Find last entry
+        let stop = if let Some(stop) = stop {
+            stop
+        } else if let Some((key, _entry)) = log.iterator(rocksdb::IteratorMode::End).next() {
+            let key: [u8; 8] = key[0..8].try_into()?;
+            u64::from_le_bytes(key) + 1
+        } else {
+            0
+        };
+
+		for index in start..stop {
+			log.delete(index.to_le_bytes())?;
+		}
 
         Ok(())
     }
