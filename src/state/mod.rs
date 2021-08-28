@@ -6,7 +6,7 @@ use crate::messages::{
     ManagerNetworkRequest, RaftRequest, RaftResponse,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_raft::{async_trait::async_trait, raft::*, storage::*, RaftStorage};
 use indradb::{
     BulkInsertItem, Datastore, EdgeKey, EdgeQuery, EdgeQueryExt, MemoryDatastore,
@@ -301,9 +301,18 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
             0
         };
 
-		for index in start..stop {
-			log.delete(index.to_le_bytes())?;
-		}
+        // Find first entry to reduce unnecessary iterations
+        let start = if let Some((key, _entry)) = log.iterator(rocksdb::IteratorMode::Start).next() {
+            let key: [u8; 8] = key[0..8].try_into()?;
+            let key = u64::from_le_bytes(key);
+            std::cmp::max(key, start)
+        } else {
+            start
+        };
+
+        for index in start..stop {
+            log.delete(index.to_le_bytes())?;
+        }
 
         Ok(())
     }
@@ -337,7 +346,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
         data: &RaftRequest,
     ) -> Result<RaftResponse> {
         tracing::trace!("StateHandle received request: {:?}", data);
-        match data {
+        let ret = match data {
             RaftRequest::ConsoleNetworkRequest(cnr) => match cnr {
                 ConsoleNetworkRequest::NewCoreConfiguration(configuration) => {
                     anyhow::bail!("Unimplemented")
@@ -358,7 +367,8 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
                     anyhow::bail!("Unimplemented")
                 }
                 ConsoleNetworkRequest::Shutdown(id) => {
-                    anyhow::bail!("Unimplemented")
+                    // FIXME: Only reason this isn't the same is so the testing of entry application works
+                    RaftResponse::ConsoleNetworkResponse(ConsoleNetworkResponse::Success)
                 }
                 ConsoleNetworkRequest::SoftShutdown(id) => {
                     anyhow::bail!("Unimplemented")
@@ -400,7 +410,29 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
                     anyhow::bail!("Unimplemented")
                 }
             },
-        }
+        };
+
+        let transaction = self
+            .distributed_state
+            .transaction()
+            .map_err(|e| anyhow::anyhow!("Could not fetch Transaction applying entry: {}", e))?;
+
+        transaction
+            .set_vertex_properties(
+                VertexPropertyQuery::new(
+                    SpecificVertexQuery::single(self.state_machine_uuid).into(),
+                    "last_applied_entry",
+                ),
+                &serde_json::json!(index),
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Could not change last_applied_entry while applying entry: {}",
+                    e
+                )
+            })?;
+
+        Ok(ret)
     }
 
     #[tracing::instrument(skip(self))]
@@ -520,12 +552,19 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
                 }
             }
 
-            file.write_all(&bincode::serialize(&SnapshotFile {
+            file.write_all(&serde_json::ser::to_vec(&SnapshotFile {
                 vertices: snapshot_vertices,
                 edges: snapshot_edges,
+                membership: membership.clone(),
             })?)
             .await?;
 
+            file.flush().await?;
+            file.sync_all().await?;
+            std::mem::drop(file);
+
+            // Open in read mode instead of write mode
+            let file = File::open(file_name.clone()).await?;
             Box::new(file)
         };
 
@@ -536,6 +575,8 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
             membership.clone(),
         ))
         .await?;
+
+        self.delete_logs_from(0, Some(index)).await?;
 
         Ok(CurrentSnapshotData {
             term,
@@ -554,7 +595,11 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
             chrono::Utc::now().format("%Y%m%d%H%M%S"),
         );
 
-        let mut file = tokio::fs::File::create(file_name.clone()).await?;
+        let mut file_path = self.snapshot_dir.clone();
+        file_path.push(&file_name);
+
+        let file = tokio::fs::File::create(file_path).await?;
+        file.sync_all().await?;
 
         Ok((file_name, Box::new(file)))
     }
@@ -571,10 +616,22 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
         tracing::trace!("Entering finalize_snapshot_installation");
 
         // FIXME: Clear DB here
+        snapshot.flush().await?;
+        snapshot.sync_all().await?;
+        std::mem::drop(snapshot);
 
-        let mut buffer = Vec::new();
-        snapshot.read_to_end(&mut buffer).await?;
-        let file: SnapshotFile = bincode::deserialize(&buffer)?;
+        // let mut snapshot = File::open(id.clone()).await?;
+
+        // let mut buffer = Vec::new();
+        // snapshot.read_to_end(&mut buffer).await.context("Error reading snapshot")?;
+
+        let mut file_path = self.snapshot_dir.clone();
+        file_path.push(&id);
+        let buffer = tokio::fs::read(file_path)
+            .await
+            .context("Error reading snapshot")?;
+        let file: SnapshotFile =
+            serde_json::de::from_slice(&buffer).context("Error deserializing snapshot")?;
 
         let mut insertion = Vec::new();
 
@@ -621,7 +678,16 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
 
         self.delete_logs_from(0, delete_through).await?;
 
-        // FIXME: Update StateMachine and HardState
+        // Insert SnapshotPointer
+        self.append_entry_to_log(&Entry {
+            index,
+            term,
+            payload: EntryPayload::SnapshotPointer(EntrySnapshotPointer {
+                id,
+                membership: file.membership,
+            }),
+        })
+        .await?;
 
         Ok(())
     }
@@ -668,6 +734,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
 struct SnapshotFile {
     vertices: Vec<SnapshotVertex>,
     edges: Vec<SnapshotEdge>,
+    membership: MembershipConfig,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

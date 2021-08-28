@@ -287,3 +287,75 @@ async fn log_operations_test() {
     let les = sm.get_log_entries(1, 4).await.unwrap();
     assert_eq!(les.len(), 0);
 }
+
+// TODO: apply_entry_to_state_machine and replicate_to_state_machine testing
+
+// Snapshot test
+
+#[tokio::test]
+async fn snapshot_tests() {
+    let (sm, _dir) = get_state_manager();
+
+    let le1 = Entry {
+        term: 1,
+        index: 1,
+        payload: EntryPayload::ConfigChange(EntryConfigChange {
+            membership: MembershipConfig::new_initial(0),
+        }),
+    };
+    let le2 = Entry {
+        term: 1,
+        index: 2,
+        payload: EntryPayload::Normal(EntryNormal {
+            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(1)),
+        }),
+    };
+    let le3 = Entry {
+        term: 1,
+        index: 3,
+        payload: EntryPayload::Normal(EntryNormal {
+            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(2)),
+        }),
+    };
+
+    let uuid = sm
+        .distributed_state
+        .transaction()
+        .unwrap()
+        .create_vertex_from_type(Type::new("Something").unwrap())
+        .unwrap();
+
+    let les = [le1, le2, le3];
+    sm.replicate_to_log(&les[..]).await.unwrap();
+    sm.apply_entry_to_state_machine(
+        &2,
+        &RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(1)),
+    )
+    .await
+    .unwrap();
+
+    let mut file = sm.do_log_compaction().await.unwrap();
+    assert_eq!(sm.get_log_entries(1, 4).await.unwrap().len(), 2);
+
+    let (sm2, _dir2) = get_state_manager();
+
+    let (filename, mut file2) = sm2.create_snapshot().await.unwrap();
+
+    let mut buffer = Vec::new();
+    file.snapshot.read_to_end(&mut buffer).await.unwrap();
+    file2.write_all(&buffer).await.unwrap();
+
+    sm2.finalize_snapshot_installation(3, 1, Some(3), filename, file2)
+        .await
+        .unwrap();
+
+    assert_eq!(sm2.get_log_entries(1, 4).await.unwrap().len(), 1);
+    assert!(sm2
+        .distributed_state
+        .transaction()
+        .unwrap()
+        .get_vertices(SpecificVertexQuery::single(uuid))
+        .unwrap()
+        .pop()
+        .is_some())
+}
