@@ -1,6 +1,7 @@
 use common_model::{instance_management::ServerHealth, InstancePath};
 
 use anyhow::Result;
+use async_raft::raft::Raft;
 use indradb::{Datastore, Transaction};
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 use tokio::{
@@ -9,16 +10,18 @@ use tokio::{
 };
 
 mod configuration;
-mod connection_manager;
+mod connections;
 mod io;
 mod messages;
 mod peers;
-use peers::peer_tracker;
 mod state;
 mod tls;
 
-use connection_manager::ConnectionManagerToMain as FromConnectionManager;
-use connection_manager::MainToConnectionManager as ToConnectionManager;
+use peers::peer_tracker::*;
+use state::StateManager;
+
+use connections::ConnectionManagerToMain as FromConnectionManager;
+use connections::MainToConnectionManager as ToConnectionManager;
 
 use io::IoToMain as FromIo;
 
@@ -69,13 +72,12 @@ async fn main() -> Result<()> {
         .collect::<Vec<_>>();
 
     // The state manager controls the databases and the handle is an abstraction for queries to it
-    let state_manager = state::StateManager::new(
+    let state_manager = Arc::new(state::StateManager::new(
         self_id.unwrap(),
         local_conf.shared_conf_db_path,
         local_conf.log_file_path,
         local_conf.snapshot_save_dir,
-    )?;
-    // TODO: Get Raft thread going here
+    )?);
 
     // Spawn IO thread
     let (io_s, mut io_r) = mpsc::channel::<FromIo>(128);
@@ -100,11 +102,25 @@ async fn main() -> Result<()> {
     ));
 
     // Spawn peer tracking thread
-    let peer_tracker = peer_tracker::PeerTacker::new();
+    let peer_tracker = PeerTacker::new();
     let peer_tracker_handle = peer_tracker.handle();
+    let raft_peer_handle = Arc::new(peer_tracker.handle());
     tokio::spawn(peer_tracker.run());
 
     // Spawn instance tracking thread
+    // Spawn console tracking thread
+
+    // Raft
+    // TODO: Don't hardcode name or anything
+    let raft_config = Arc::new(async_raft::Config::build("instance-manager".into()).validate()?);
+    let raft = ImRaft::new(
+        self_id.unwrap(),
+        raft_config,
+        raft_peer_handle,
+        state_manager,
+    );
+
+    // TODO: Send clone of Raft Arc to the PeerTacker or make peer_tracker.run() take an argument
 
     loop {
         tokio::select! {
@@ -148,3 +164,6 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+pub type ImRaft =
+    Raft<messages::RaftRequest, messages::RaftResponse, PeerTrackerHandle, StateManager>;
