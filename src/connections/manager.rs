@@ -1,10 +1,7 @@
 use crate::{messages::*, peers::peer_tracker::PeerTrackerHandle, ImRaft};
 
 use anyhow::{Context, Result};
-use futures::{
-    stream::{futures_unordered::FuturesUnordered, StreamExt},
-    Future,
-};
+use futures::stream::{futures_unordered::FuturesUnordered, StreamExt};
 use rand::{distributions::Uniform, seq::SliceRandom, thread_rng, Rng};
 use rustls::{ClientConfig, ServerConfig};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -25,7 +22,7 @@ pub enum Response {
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Request {
-    FormConnectionWith(SocketAddr),
+    FormConnectionWith(u64, SocketAddr),
     Shutdown,
 }
 
@@ -41,20 +38,23 @@ pub struct ConnectionManager {
     client_config: Arc<ClientConfig>,
     tcp_listener: TcpListener,
     tls_acceptor: TlsAcceptor,
+
+    /// The SocketAddr that the ConnectionManager listens on is kept noted so the node can identify
+    /// itself when connecting to other peers on the network
     listener_addr: SocketAddr,
 
+    /// The Raft ID and listener_addr of peers that the ConnectionManager will attempt to connect to
     form_connections_with: Vec<(u64, SocketAddr)>,
+    /// The Raft ID and listener_addr of peers who the ConnectionManager has failed to connect to,
+    /// and is instead waiting for them to initiate the connection
     await_connections_from: Vec<(u64, SocketAddr)>,
-
-    unmanaged_connections: FuturesUnordered<
-        std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<(Greeting, TlsConnection<TcpStream>)>>>,
-        >,
-    >,
-
+    /// `Request` receiver from any number of `ConnectionManagerHandle`s
     from_handle: mpsc::Receiver<(Request, oneshot::Sender<Response>)>,
+    /// A sender to the `Request` receiver used for creating new `ConnectionManagerHandle`s
     handle_sender_master: mpsc::Sender<(Request, oneshot::Sender<Response>)>,
 
+    /// This handle, for passing a connection to the `PeerTracker`, will always be Some if the
+    /// `ConnectionManager` is running
     peer_tracker_handle: Option<PeerTrackerHandle>,
     // TODO: InstanceTrackerHandle and ConsoleTrackerHandles
 }
@@ -71,7 +71,6 @@ impl ConnectionManager {
 
         let form_connections_with = initial_connections;
         let await_connections_from = Vec::new();
-        let unmanaged_connections = FuturesUnordered::new();
 
         let (handle_sender_master, from_handle) = mpsc::channel(32);
 
@@ -84,17 +83,26 @@ impl ConnectionManager {
             listener_addr,
             form_connections_with,
             await_connections_from,
-            unmanaged_connections,
             from_handle,
             handle_sender_master,
             peer_tracker_handle,
         })
     }
 
+    pub fn handle(&self) -> super::handle::ConnectionManagerHandle {
+        super::handle::ConnectionManagerHandle {
+            sender: self.handle_sender_master.clone(),
+        }
+    }
+
     #[tracing::instrument(skip(self, peer_tracker_handle))]
     pub async fn run(mut self, peer_tracker_handle: PeerTrackerHandle) -> Result<()> {
         self.peer_tracker_handle = Some(peer_tracker_handle);
 
+        // Upon forming an inbound connection -- the ConnectionManager awaits for the initial
+        // message from the client identifying the type of connection and, thus, whether it should
+        // be routed to the PeerTracker, InstanceTracker, or ConsoleTracker
+        let mut unmanaged_connections = FuturesUnordered::new();
         loop {
             let loop_result;
             match (
@@ -102,7 +110,7 @@ impl ConnectionManager {
                 // timer while `tokio::select!`ing
                 self.form_connections_with.is_empty(),
                 // Similarly, don't poll from the FuturesUnordered if it is empty
-                self.unmanaged_connections.is_empty(),
+                unmanaged_connections.is_empty(),
             ) {
                 (false, false) => {
                     let wait_interval = Uniform::new_inclusive(150u64, 500u64);
@@ -114,12 +122,18 @@ impl ConnectionManager {
                             }
                         },
 
-                        msg = self.unmanaged_connections.next() => {
+                        msg = unmanaged_connections.next() => {
                             loop_result = self.handle_unmanaged_connection(msg).await;
                         }
 
                         connection = self.tcp_listener.accept() => {
-                            loop_result = self.handle_connection(connection).await;
+                            loop_result = match self.handle_connection(connection).await {
+                                Ok(stream) => {
+                                    unmanaged_connections.push(stream.read_message_and_take_self());
+                                    Ok(())
+                                },
+                                Err(e) => Err(e),
+                            };
                         }
 
                         _ = tokio::time::sleep(Duration::from_millis(thread_rng().sample(wait_interval))) => {
@@ -138,14 +152,19 @@ impl ConnectionManager {
                         },
 
                         connection = self.tcp_listener.accept() => {
-                            loop_result = self.handle_connection(connection).await;
+                            loop_result = match self.handle_connection(connection).await {
+                                Ok(stream) => {
+                                    unmanaged_connections.push(stream.read_message_and_take_self());
+                                    Ok(())
+                                },
+                                Err(e) => Err(e),
+                            };
                         }
 
                         _ = tokio::time::sleep(Duration::from_millis(thread_rng().sample(wait_interval))) => {
                             loop_result = self.initiate_connection().await;
                         }
                     }
-
                 }
                 (true, false) => {
                     tokio::select! {
@@ -156,12 +175,18 @@ impl ConnectionManager {
                             }
                         },
 
-                        msg = self.unmanaged_connections.next() => {
+                        msg = unmanaged_connections.next() => {
                             loop_result = self.handle_unmanaged_connection(msg).await;
                         }
 
                         connection = self.tcp_listener.accept() => {
-                            loop_result = self.handle_connection(connection).await;
+                            loop_result = match self.handle_connection(connection).await {
+                                Ok(stream) => {
+                                    unmanaged_connections.push(stream.read_message_and_take_self());
+                                    Ok(())
+                                },
+                                Err(e) => Err(e),
+                            };
                         }
 
                     }
@@ -176,7 +201,13 @@ impl ConnectionManager {
                         },
 
                         connection = self.tcp_listener.accept() => {
-                            loop_result = self.handle_connection(connection).await;
+                            loop_result = match self.handle_connection(connection).await {
+                                Ok(stream) => {
+                                    unmanaged_connections.push(stream.read_message_and_take_self());
+                                    Ok(())
+                                },
+                                Err(e) => Err(e),
+                            };
                         }
 
                     }
@@ -280,7 +311,7 @@ impl ConnectionManager {
     async fn handle_connection(
         &mut self,
         connection: std::io::Result<(TcpStream, SocketAddr)>,
-    ) -> Result<()> {
+    ) -> Result<TlsConnection<TcpStream>> {
         let (stream, socket) = connection.context("Error handling incoming connection")?;
         tracing::info!("Connection from {}", socket);
 
@@ -291,10 +322,7 @@ impl ConnectionManager {
                 .context("Error forming TLS connection")?,
         );
 
-        self.unmanaged_connections
-            .push(Box::pin(stream.read_message_and_take_self()));
-
-        Ok(())
+        Ok(stream)
     }
 
     #[tracing::instrument(skip(self))]
@@ -351,15 +379,16 @@ impl ConnectionManager {
             break;
         }
 
-        let index = self.form_connections_with
+        let index = self
+            .form_connections_with
             .iter()
             .position(|&(raft_id, _)| raft_id == *id);
         if let Some(index) = index {
-			let removed = self.form_connections_with.remove(index);
+            let removed = self.form_connections_with.remove(index);
 
-			if !connected {
-				self.await_connections_from.push(removed);
-			}
+            if !connected {
+                self.await_connections_from.push(removed);
+            }
         }
 
         Ok(())

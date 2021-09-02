@@ -3,7 +3,7 @@ mod tests;
 
 use crate::messages::{
     ConsoleNetworkRequest, ConsoleNetworkResponse, InstanceNetworkRequest, InstanceNetworkResponse,
-    ManagerNetworkRequest, RaftRequest, RaftResponse,
+    ManagerNetworkRequest, RaftRequest, RaftRequestPayload, RaftResponse,
 };
 
 use anyhow::{Context, Result};
@@ -346,8 +346,8 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
         data: &RaftRequest,
     ) -> Result<RaftResponse> {
         tracing::trace!("StateHandle received request: {:?}", data);
-        let ret = match data {
-            RaftRequest::ConsoleNetworkRequest(cnr) => match cnr {
+        let ret = match &data.payload {
+            RaftRequestPayload::ConsoleNetworkRequest(cnr) => match cnr {
                 ConsoleNetworkRequest::NewCoreConfiguration(configuration) => {
                     anyhow::bail!("Unimplemented")
                 }
@@ -380,7 +380,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
                     anyhow::bail!("Unimplemented")
                 }
             },
-            RaftRequest::InstanceNetworkRequest(inr) => match inr {
+            RaftRequestPayload::InstanceNetworkRequest(inr) => match inr {
                 InstanceNetworkRequest::SpawnChild {
                     request_id,
                     instance_name,
@@ -396,7 +396,7 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
                     anyhow::bail!("Unimplemented")
                 }
             },
-            RaftRequest::ManagerNetworkRequest(mnr) => match mnr {
+            RaftRequestPayload::ManagerNetworkRequest(mnr) => match mnr {
                 ManagerNetworkRequest::UpdateServerHealth {
                     manager_id,
                     ports_free,

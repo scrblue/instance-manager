@@ -1,4 +1,2 @@
-mod handle;
-mod manager;
-
-mod connection_manager;
+pub mod handle;
+pub mod manager;

@@ -30,6 +30,7 @@ use super::TrackerToConnection as ToConnection;
 // TODO: Error handling
 // TODO: Compare match Request model to separate senders and receivers per request
 
+#[derive(Debug, Clone)]
 pub struct PeerTrackerHandle {
     request_sender: mpsc::Sender<(Request, oneshot::Sender<Response>)>,
     sdr_sender: mpsc::Sender<()>,

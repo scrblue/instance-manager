@@ -20,9 +20,6 @@ mod tls;
 use peers::peer_tracker::*;
 use state::StateManager;
 
-use connections::ConnectionManagerToMain as FromConnectionManager;
-use connections::MainToConnectionManager as ToConnectionManager;
-
 use io::IoToMain as FromIo;
 
 #[tokio::main]
@@ -83,24 +80,6 @@ async fn main() -> Result<()> {
     let (io_s, mut io_r) = mpsc::channel::<FromIo>(128);
     tokio::spawn(io::handle_io(io_s));
 
-    // Spawn connection managment thread
-
-    // First create the channels
-    let (connection_manager_to_main_s, mut connection_manager_r) =
-        mpsc::channel::<FromConnectionManager>(128);
-    let (connection_manager_s, main_to_connection_manager_r) =
-        mpsc::channel::<ToConnectionManager>(128);
-
-    // Then actually spawn it
-    tokio::spawn(connection_manager::handle_connections(
-        connection_manager_to_main_s,
-        main_to_connection_manager_r,
-        listener_socket_addr,
-        server_conf,
-        client_conf,
-        peers,
-    ));
-
     // Spawn peer tracking thread
     let peer_tracker = PeerTacker::new();
     let peer_tracker_handle = peer_tracker.handle();
@@ -109,6 +88,17 @@ async fn main() -> Result<()> {
 
     // Spawn instance tracking thread
     // Spawn console tracking thread
+
+    // Spawn connection managment thread
+    let connection_manager = connections::manager::ConnectionManager::new(
+        client_conf,
+        server_conf,
+        listener_socket_addr,
+        peers,
+    )
+    .await?;
+    let connection_manager_handle = connection_manager.handle();
+    tokio::spawn(connection_manager.run(peer_tracker_handle.clone()));
 
     // Raft
     // TODO: Don't hardcode name or anything
@@ -137,27 +127,10 @@ async fn main() -> Result<()> {
                 }
             }
 
-            msg = connection_manager_r.recv() => {
-                match msg {
-                    // TODO: Give ConnectionManager a PeerTrackerHandle
-                    Some(FromConnectionManager::ConnectedPeer(id, listener_addr, stream)) => {
-                        peer_tracker_handle.add_peer(id, listener_addr, stream).await?;
-                    },
-                    Some(msg) => tracing::info!("CM msg: {:?}", msg),
-                    None => {
-                        // TODO: Restart on failuer
-                        tracing::error!("Connection manager channel closed");
-                        break;
-                    },
-                }
-            }
         }
     }
 
-    connection_manager_s
-        .send(ToConnectionManager::Shutdown)
-        .await?;
-
+    connection_manager_handle.shutdown().await?;
     peer_tracker_handle.shutdown().await?;
 
     // FIXME: IO shutdown
