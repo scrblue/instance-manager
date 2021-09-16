@@ -80,11 +80,10 @@ async fn main() -> Result<()> {
     let (io_s, mut io_r) = mpsc::channel::<FromIo>(128);
     tokio::spawn(io::handle_io(io_s));
 
-    // Spawn peer tracking thread
-    let peer_tracker = PeerTacker::new();
+    // Prepare to spawn peer tracking thread
+    let peer_tracker = PeerTacker::new(Arc::new(core_conf));
     let peer_tracker_handle = peer_tracker.handle();
     let raft_peer_handle = Arc::new(peer_tracker.handle());
-    tokio::spawn(peer_tracker.run());
 
     // Spawn instance tracking thread
     // Spawn console tracking thread
@@ -103,14 +102,15 @@ async fn main() -> Result<()> {
     // Raft
     // TODO: Don't hardcode name or anything
     let raft_config = Arc::new(async_raft::Config::build("instance-manager".into()).validate()?);
-    let raft = ImRaft::new(
+    let raft = Arc::new(ImRaft::new(
         self_id.unwrap(),
         raft_config,
         raft_peer_handle,
         state_manager,
-    );
+    ));
 
-    // TODO: Send clone of Raft Arc to the PeerTacker or make peer_tracker.run() take an argument
+    // And actually spawn the PeerTacker, passing it a clone of the Arc<ImRaft>
+    tokio::spawn(peer_tracker.run(raft.clone()));
 
     loop {
         tokio::select! {
@@ -136,6 +136,13 @@ async fn main() -> Result<()> {
     // FIXME: IO shutdown
 
     Ok(())
+}
+
+pub enum AppState {
+    Discovery,
+    Initiation,
+    ShareDistributedConf,
+    RequestResponseLoop,
 }
 
 pub type ImRaft =

@@ -1,8 +1,13 @@
 use super::peer_connection;
-use crate::messages::{ManagerManagerRequest, ManagerManagerResponse, RaftRequest};
+use crate::{
+    configuration::CoreConfig,
+    messages::{ManagerManagerRequest, ManagerManagerResponse, RaftRequest},
+    ImRaft,
+};
 
 use anyhow::{Context, Result};
 use async_raft::{async_trait::async_trait, network::RaftNetwork, raft::*, NodeId};
+use futures::stream::{futures_unordered::FuturesUnordered, StreamExt};
 use std::{collections::HashMap, convert::TryInto, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpStream,
@@ -137,18 +142,21 @@ impl RaftNetwork<RaftRequest> for PeerTrackerHandle {
 }
 
 pub struct PeerTacker {
+    // Used to make comparisons with incoming peers
+    core_config: Arc<CoreConfig>,
+
     // Requests to the PeerTracker
     request_receiver: mpsc::Receiver<(Request, oneshot::Sender<Response>)>,
     shutdown_request_receiver: mpsc::Receiver<()>,
 
-    // TODO: raft_handle: RaftHandle,
-
     // Peer connections message Senders and JoinHandles
     peer_handles: HashMap<u64, (tokio::task::JoinHandle<()>, mpsc::Sender<ToConnection>)>,
+    unconfirmed_peer_handles:
+        HashMap<u64, (tokio::task::JoinHandle<()>, mpsc::Sender<ToConnection>)>,
 
     // Master peer connection sender and receiver
-    to_tracker_master: mpsc::Sender<FromConnection>,
-    from_peers: mpsc::Receiver<FromConnection>,
+    to_tracker_master: mpsc::Sender<(u64, FromConnection)>,
+    from_peers: mpsc::Receiver<(u64, FromConnection)>,
 
     // To be cloned when spawning a PeerTrackerHandle
     request_sender: mpsc::Sender<(Request, oneshot::Sender<Response>)>,
@@ -157,16 +165,19 @@ pub struct PeerTacker {
 
 impl PeerTacker {
     #[tracing::instrument]
-    pub fn new() -> PeerTacker {
+    pub fn new(core_config: Arc<CoreConfig>) -> PeerTacker {
         let (request_sender, request_receiver) = mpsc::channel(128);
         let (sdr_sender, shutdown_request_receiver) = mpsc::channel(1);
         let peer_handles = HashMap::new();
+        let unconfirmed_peer_handles = HashMap::new();
         let (to_tracker_master, from_peers) = mpsc::channel(128);
 
         PeerTacker {
+            core_config,
             request_receiver,
             shutdown_request_receiver,
             peer_handles,
+            unconfirmed_peer_handles,
             to_tracker_master,
             from_peers,
             request_sender,
@@ -181,8 +192,8 @@ impl PeerTacker {
         }
     }
 
-    #[tracing::instrument(skip(self))]
-    pub async fn run(mut self) -> Result<()> {
+    #[tracing::instrument(skip(self, raft))]
+    pub async fn run(mut self, raft: Arc<ImRaft>) -> Result<()> {
         loop {
             tokio::select! {
                 msg = self.shutdown_request_receiver.recv() => {
@@ -200,50 +211,157 @@ impl PeerTacker {
                 },
 
                 msg = self.request_receiver.recv() => {
-                    match msg {
-                        Some((Request::NewPeer(id, socket_addr, connection), tx)) => {
-                            let (sender, receiver) = mpsc::channel::<ToConnection>(128);
-
-                            self.peer_handles.insert(id, (
-                                tokio::spawn(peer_connection::handle_peer_connection(
-                                    self.to_tracker_master.clone(),
-                                    receiver,
-                                    connection,
-                                    id
-                                )),
-                                sender
-                            ));
-
-                            // TODO: Notify RaftHandle
-
-                            tx.send(Response::Ok);
-                        }
-
-                        Some(other) => {
-                            // TODO: ManagerManagerRequest message handling
-                            tracing::error!("Unimplemented request: {:?}", other);
-                        }
-
-                        None => {
-                            tracing::error!("Main thread channel closed");
-                            break;
-                        }
-
+                    if let Some(msg) = msg {
+                        self.handle_peer_handle_request(msg).await?;
+                    } else {
+                        tracing::error!("Main thread channel closed");
+                        anyhow::bail!("Main thread channel to peer tracker closed");
                     }
                 },
 
                 msg = self.from_peers.recv() => {
-                    match msg {
-                        Some(msg) => {
-                            tracing::info!("Message from connection: {:?}", msg);
-                        }
-                        None => {
-                            tracing::error!("All connection channels closed");
-                            break;
-                        }
+                    if let Some(msg) = msg {
+                        self.handle_peer_message(msg).await?;
+                    } else {
+                        tracing::error!("All connection channels closed");
+                        anyhow::bail!("All connection channels to peer tracker closed");
                     }
+
                 },
             }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_peer_handle_request(
+        &mut self,
+        msg: (Request, oneshot::Sender<Response>),
+    ) -> Result<()> {
+        match msg {
+            (Request::NewPeer(id, socket_addr, mut connection), tx) => {
+                let (sender, receiver) = mpsc::channel::<ToConnection>(128);
+
+                connection
+                    .send_message(&ManagerManagerRequest::CompareCoreConfig(
+                        self.core_config.as_ref().clone(),
+                    ))
+                    .await?;
+
+                self.unconfirmed_peer_handles.insert(
+                    id,
+                    (
+                        tokio::spawn(peer_connection::handle_peer_connection(
+                            self.to_tracker_master.clone(),
+                            receiver,
+                            connection,
+                            id,
+                            None,
+                        )),
+                        sender,
+                    ),
+                );
+
+                let _ = tx.send(Response::Ok);
+            }
+
+            (other, _tx) => {
+                // TODO: ManagerManagerRequest message handling
+                tracing::error!("Unimplemented request: {:?}", other);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_peer_message(&mut self, msg: (u64, FromConnection)) -> Result<()> {
+        tracing::info!("Message from connection: {:?}", msg);
+        match msg {
+            // When given a CompareCoreConfig request, first fetch the peer
+            // handle from the map of unconfirmed_peer_handles, compare the
+            // configurations, send either a ToConnection::CoreConfigMatch or
+            // CoreConfigNoMatch in response, and if it matches, delete the
+            // handle from the unconfirmed_peer_handles and add it to the
+            // peer_handles
+            (id, FromConnection::Request(ManagerManagerRequest::CompareCoreConfig(cc))) => {
+                self.handle_compare_core_config(id, cc).await?;
+            }
+            (
+                id,
+                FromConnection::Request(ManagerManagerRequest::AppendEntries {
+                    term,
+                    leader_id,
+                    prev_log_index,
+                    prev_log_term,
+                    entries,
+                    leader_commit,
+                }),
+            ) => {}
+            (
+                id,
+                FromConnection::Request(ManagerManagerRequest::InstallSnapshot {
+                    term,
+                    leader_id,
+                    last_included_index,
+                    last_included_term,
+                    offset,
+                    data,
+                    done,
+                }),
+            ) => {}
+            (
+                id,
+                FromConnection::Request(ManagerManagerRequest::RequestVote {
+                    term,
+                    candidate_id,
+                    last_log_index,
+                    last_log_term,
+                }),
+            ) => {}
+
+            (id, FromConnection::Response(ManagerManagerResponse::RequireCoreConfig)) => {}
+            (id, FromConnection::Response(ManagerManagerResponse::ConnectionAccepted)) => {}
+            (id, FromConnection::Response(ManagerManagerResponse::ConnectionDenied)) => {}
+            (
+                id,
+                FromConnection::Response(ManagerManagerResponse::AppendEntriesResponse {
+                    term,
+                    success,
+                    conflict_opt,
+                }),
+            ) => {}
+            (
+                id,
+                FromConnection::Response(ManagerManagerResponse::InstallSnapshotResponse(
+                    snapshot_id,
+                )),
+            ) => {}
+            (
+                id,
+                FromConnection::Response(ManagerManagerResponse::VoteResponse {
+                    term,
+                    vote_granted,
+                }),
+            ) => {}
+        }
+
+        Ok(())
+    }
+
+    async fn handle_compare_core_config(&mut self, id: u64, cc: CoreConfig) -> Result<()> {
+        let mut delete_from_unconfirmed = false;
+        if let Some((_join_handle, sender)) = self.unconfirmed_peer_handles.get(&id) {
+            if &cc == self.core_config.as_ref() {
+                delete_from_unconfirmed = true;
+                sender.send(ToConnection::CoreConfigMatch).await?;
+            } else {
+                sender.send(ToConnection::CoreConfigNoMatch).await?;
+            }
+        }
+
+        if delete_from_unconfirmed {
+            let (join_handle, sender) = self.unconfirmed_peer_handles.remove(&id).unwrap();
+            self.peer_handles.insert(id, (join_handle, sender));
         }
 
         Ok(())
