@@ -1,13 +1,16 @@
 use super::peer_connection;
 use crate::{
     configuration::CoreConfig,
-    messages::{ManagerManagerRequest, ManagerManagerResponse, RaftRequest},
+    messages::{
+        InstanceManagerMessage, ManagerManagerRequest, ManagerManagerResponse, RaftRequest,
+    },
     ImRaft,
 };
 
 use anyhow::{Context, Result};
 use async_raft::{async_trait::async_trait, network::RaftNetwork, raft::*, NodeId};
 use futures::stream::{futures_unordered::FuturesUnordered, StreamExt};
+use rand::prelude::*;
 use std::{collections::HashMap, convert::TryInto, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpStream,
@@ -37,7 +40,7 @@ use super::TrackerToConnection as ToConnection;
 
 #[derive(Debug, Clone)]
 pub struct PeerTrackerHandle {
-    request_sender: mpsc::Sender<(Request, oneshot::Sender<Response>)>,
+    request_sender: mpsc::Sender<(Request, Option<oneshot::Sender<ManagerManagerResponse>>)>,
     sdr_sender: mpsc::Sender<()>,
 }
 
@@ -54,16 +57,11 @@ impl PeerTrackerHandle {
         public_addr: SocketAddr,
         connection: TlsConnection<TcpStream>,
     ) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
         self.request_sender
-            .send((Request::NewPeer(id, public_addr, connection), tx))
+            .send((Request::NewPeer(id, public_addr, connection), None))
             .await?;
 
-        if let Ok(Response::Ok) = rx.await {
-            Ok(())
-        } else {
-            anyhow::bail!("Error adding peer");
-        }
+        Ok(())
     }
 }
 
@@ -74,24 +72,18 @@ impl RaftNetwork<RaftRequest> for PeerTrackerHandle {
         target: NodeId,
         rpc: AppendEntriesRequest<RaftRequest>,
     ) -> Result<AppendEntriesResponse> {
-        let (resp_send, resp_recv) = oneshot::channel::<Response>();
+        let (resp_send, resp_recv) = oneshot::channel::<ManagerManagerResponse>();
         self.request_sender
             .send((
                 Request::ManagerManagerRequest(target, rpc.into()),
-                resp_send,
+                Some(resp_send),
             ))
             .await?;
 
         resp_recv
             .await
             .context("Error receiving response for AppendEntriesRequest")
-            .map(|resp| {
-                if let Response::ManagerManagerResponse(mmr) = resp {
-                    Ok(mmr.try_into()?)
-                } else {
-                    anyhow::bail!("Wrong response type for Raft AppendEntriesRequest")
-                }
-            })?
+            .map(|resp| Ok(resp.try_into()?))?
     }
 
     async fn install_snapshot(
@@ -99,45 +91,33 @@ impl RaftNetwork<RaftRequest> for PeerTrackerHandle {
         target: NodeId,
         rpc: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse> {
-        let (resp_send, resp_recv) = oneshot::channel::<Response>();
+        let (resp_send, resp_recv) = oneshot::channel::<ManagerManagerResponse>();
         self.request_sender
             .send((
                 Request::ManagerManagerRequest(target, rpc.into()),
-                resp_send,
+                Some(resp_send),
             ))
             .await?;
 
         resp_recv
             .await
             .context("Error receiving response for InstallSnapshotRequest")
-            .map(|resp| {
-                if let Response::ManagerManagerResponse(mmr) = resp {
-                    Ok(mmr.try_into()?)
-                } else {
-                    anyhow::bail!("Wrong response type for Raft InstallSnapshotRequest")
-                }
-            })?
+            .map(|resp| Ok(resp.try_into()?))?
     }
 
     async fn vote(&self, target: NodeId, rpc: VoteRequest) -> Result<VoteResponse> {
-        let (resp_send, resp_recv) = oneshot::channel::<Response>();
+        let (resp_send, resp_recv) = oneshot::channel::<ManagerManagerResponse>();
         self.request_sender
             .send((
                 Request::ManagerManagerRequest(target, rpc.into()),
-                resp_send,
+                Some(resp_send),
             ))
             .await?;
 
         resp_recv
             .await
             .context("Error receiving response for InstallSnapshotRequest")
-            .map(|resp| {
-                if let Response::ManagerManagerResponse(mmr) = resp {
-                    Ok(mmr.try_into()?)
-                } else {
-                    anyhow::bail!("Wrong response type for Raft VoteRequest")
-                }
-            })?
+            .map(|resp| Ok(resp.try_into()?))?
     }
 }
 
@@ -146,7 +126,7 @@ pub struct PeerTacker {
     core_config: Arc<CoreConfig>,
 
     // Requests to the PeerTracker
-    request_receiver: mpsc::Receiver<(Request, oneshot::Sender<Response>)>,
+    request_receiver: mpsc::Receiver<(Request, Option<oneshot::Sender<ManagerManagerResponse>>)>,
     shutdown_request_receiver: mpsc::Receiver<()>,
 
     // Peer connections message Senders and JoinHandles
@@ -159,7 +139,7 @@ pub struct PeerTacker {
     from_peers: mpsc::Receiver<(u64, FromConnection)>,
 
     // To be cloned when spawning a PeerTrackerHandle
-    request_sender: mpsc::Sender<(Request, oneshot::Sender<Response>)>,
+    request_sender: mpsc::Sender<(Request, Option<oneshot::Sender<ManagerManagerResponse>>)>,
     sdr_sender: mpsc::Sender<()>,
 }
 
@@ -236,7 +216,7 @@ impl PeerTacker {
 
     async fn handle_peer_handle_request(
         &mut self,
-        msg: (Request, oneshot::Sender<Response>),
+        msg: (Request, Option<oneshot::Sender<ManagerManagerResponse>>),
     ) -> Result<()> {
         match msg {
             (Request::NewPeer(id, socket_addr, mut connection), tx) => {
@@ -261,14 +241,15 @@ impl PeerTacker {
                         sender,
                     ),
                 );
-
-                let _ = tx.send(Response::Ok);
             }
 
-            (Request::ManagerManagerRequest(id, mmr), _tx) => {
-               	if let Some((_join_handle, sender)) = self.peer_handles.get(&id) {
-					sender.send(ToConnection::Request(mmr)).await?;
-               	}
+            (Request::ManagerManagerRequest(id, mmr), tx) => {
+                if let Some((_join_handle, sender)) = self.peer_handles.get(&id) {
+                    let id = rand::thread_rng().gen::<u64>();
+                    let mmr = InstanceManagerMessage { id, payload: mmr };
+
+                    sender.send(ToConnection::Request(mmr, tx.unwrap())).await?;
+                }
             }
         }
 
@@ -284,64 +265,105 @@ impl PeerTacker {
             // CoreConfigNoMatch in response, and if it matches, delete the
             // handle from the unconfirmed_peer_handles and add it to the
             // peer_handles
-            (id, FromConnection::Request(ManagerManagerRequest::CompareCoreConfig(cc))) => {
-                self.handle_compare_core_config(id, cc).await?;
+            (
+                peer_id,
+                FromConnection::Request(InstanceManagerMessage {
+                    id: msg_id,
+                    payload: ManagerManagerRequest::CompareCoreConfig(cc),
+                }),
+            ) => {
+                self.handle_compare_core_config(peer_id, msg_id, cc).await?;
             }
             (
-                id,
-                FromConnection::Request(ManagerManagerRequest::AppendEntries {
-                    term,
-                    leader_id,
-                    prev_log_index,
-                    prev_log_term,
-                    entries,
-                    leader_commit,
+                peer_id,
+                FromConnection::Request(InstanceManagerMessage {
+                    id: msg_id,
+                    payload:
+                        ManagerManagerRequest::AppendEntries {
+                            term,
+                            leader_id,
+                            prev_log_index,
+                            prev_log_term,
+                            entries,
+                            leader_commit,
+                        },
                 }),
             ) => {}
             (
-                id,
-                FromConnection::Request(ManagerManagerRequest::InstallSnapshot {
-                    term,
-                    leader_id,
-                    last_included_index,
-                    last_included_term,
-                    offset,
-                    data,
-                    done,
+                peer_id,
+                FromConnection::Request(InstanceManagerMessage {
+                    id: msg_id,
+                    payload:
+                        ManagerManagerRequest::InstallSnapshot {
+                            term,
+                            leader_id,
+                            last_included_index,
+                            last_included_term,
+                            offset,
+                            data,
+                            done,
+                        },
                 }),
             ) => {}
             (
-                id,
-                FromConnection::Request(ManagerManagerRequest::RequestVote {
-                    term,
-                    candidate_id,
-                    last_log_index,
-                    last_log_term,
+                peer_id,
+                FromConnection::Request(InstanceManagerMessage {
+                    id: msg_id,
+                    payload:
+                        ManagerManagerRequest::RequestVote {
+                            term,
+                            candidate_id,
+                            last_log_index,
+                            last_log_term,
+                        },
                 }),
             ) => {}
 
-            (id, FromConnection::Response(ManagerManagerResponse::RequireCoreConfig)) => {}
-            (id, FromConnection::Response(ManagerManagerResponse::ConnectionAccepted)) => {}
-            (id, FromConnection::Response(ManagerManagerResponse::ConnectionDenied)) => {}
             (
-                id,
-                FromConnection::Response(ManagerManagerResponse::AppendEntriesResponse {
-                    term,
-                    success,
-                    conflict_opt,
+                peer_id,
+                FromConnection::Response(InstanceManagerMessage {
+                    id: msg_id,
+                    payload: ManagerManagerResponse::RequireCoreConfig,
                 }),
             ) => {}
             (
-                id,
-                FromConnection::Response(ManagerManagerResponse::InstallSnapshotResponse(
-                    snapshot_id,
-                )),
+                peer_id,
+                FromConnection::Response(InstanceManagerMessage {
+                    id: msg_id,
+                    payload: ManagerManagerResponse::ConnectionAccepted,
+                }),
             ) => {}
             (
-                id,
-                FromConnection::Response(ManagerManagerResponse::VoteResponse {
-                    term,
-                    vote_granted,
+                peer_id,
+                FromConnection::Response(InstanceManagerMessage {
+                    id: msg_id,
+                    payload: ManagerManagerResponse::ConnectionDenied,
+                }),
+            ) => {}
+            (
+                peer_id,
+                FromConnection::Response(InstanceManagerMessage {
+                    id: msg_id,
+                    payload:
+                        ManagerManagerResponse::AppendEntriesResponse {
+                            term,
+                            success,
+                            conflict_opt,
+                        },
+                }),
+            ) => {}
+            (
+                peer_id,
+                FromConnection::Response(InstanceManagerMessage {
+                    id: msg_id,
+                    payload: ManagerManagerResponse::InstallSnapshotResponse(peer_snapshot_id),
+                }),
+            ) => {}
+            (
+                peer_id,
+                FromConnection::Response(InstanceManagerMessage {
+                    id: msg_id,
+                    payload: ManagerManagerResponse::VoteResponse { term, vote_granted },
                 }),
             ) => {}
         }
@@ -349,20 +371,25 @@ impl PeerTacker {
         Ok(())
     }
 
-    async fn handle_compare_core_config(&mut self, id: u64, cc: CoreConfig) -> Result<()> {
+    async fn handle_compare_core_config(
+        &mut self,
+        peer_id: u64,
+        msg_id: u64,
+        cc: CoreConfig,
+    ) -> Result<()> {
         let mut delete_from_unconfirmed = false;
-        if let Some((_join_handle, sender)) = self.unconfirmed_peer_handles.get(&id) {
+        if let Some((_join_handle, sender)) = self.unconfirmed_peer_handles.get(&peer_id) {
             if &cc == self.core_config.as_ref() {
                 delete_from_unconfirmed = true;
-                sender.send(ToConnection::CoreConfigMatch).await?;
+                sender.send(ToConnection::CoreConfigMatch(msg_id)).await?;
             } else {
-                sender.send(ToConnection::CoreConfigNoMatch).await?;
+                sender.send(ToConnection::CoreConfigNoMatch(msg_id)).await?;
             }
         }
 
         if delete_from_unconfirmed {
-            let (join_handle, sender) = self.unconfirmed_peer_handles.remove(&id).unwrap();
-            self.peer_handles.insert(id, (join_handle, sender));
+            let (join_handle, sender) = self.unconfirmed_peer_handles.remove(&peer_id).unwrap();
+            self.peer_handles.insert(peer_id, (join_handle, sender));
         }
 
         Ok(())

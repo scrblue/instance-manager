@@ -19,6 +19,7 @@ pub use common_model::instance_management::{
     manager_network::*,
 
     Greeting,
+    InstanceManagerMessage,
 };
 
 use crate::configuration;
