@@ -33,7 +33,7 @@ use super::ConnectionToTracker as FromConnection;
 use super::TrackerToConnection as ToConnection;
 
 // TODO: Error handling
-// TODO: Compare match Request model to separate senders and receivers per request
+// TODO: Compare match Request model to separate oneshot senders and receivers per request
 
 #[derive(Debug, Clone)]
 pub struct PeerTrackerHandle {
@@ -265,9 +265,10 @@ impl PeerTacker {
                 let _ = tx.send(Response::Ok);
             }
 
-            (other, _tx) => {
-                // TODO: ManagerManagerRequest message handling
-                tracing::error!("Unimplemented request: {:?}", other);
+            (Request::ManagerManagerRequest(id, mmr), _tx) => {
+               	if let Some((_join_handle, sender)) = self.peer_handles.get(&id) {
+					sender.send(ToConnection::Request(mmr)).await?;
+               	}
             }
         }
 
