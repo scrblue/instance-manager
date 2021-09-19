@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
         client_conf,
         server_conf,
         listener_socket_addr,
+        local_conf.is_core_member,
         peers,
     )
     .await?;

@@ -67,13 +67,17 @@ impl ConnectionManager {
         client_config: Arc<ClientConfig>,
         server_config: Arc<ServerConfig>,
         listener_addr: SocketAddr,
+        form_connections: bool,
         initial_connections: Vec<(u64, SocketAddr)>,
     ) -> Result<ConnectionManager> {
         let tcp_listener = TcpListener::bind(listener_addr).await?;
         let tls_acceptor = TlsAcceptor::from(server_config);
 
-        let form_connections_with = initial_connections;
-        let await_connections_from = Vec::new();
+        let (form_connections_with, await_connections_from) = if form_connections {
+            (initial_connections, Vec::new())
+        } else {
+            (Vec::new(), initial_connections)
+        };
         let initial_connection_ids = form_connections_with.iter().map(|e| e.0).collect();
 
         let (handle_sender_master, from_handle) = mpsc::channel(32);

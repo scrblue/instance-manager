@@ -14,7 +14,8 @@
 	
 	shared_conf_db_path: "./test2.db",
 	log_file_path: "./test1_log.db",
-	snapshot_save_dir: "./"
+	snapshot_save_dir: "./",
+	is_core_member: true,
 
 	// Core Config
 	root_ca_cert: "../tls/cert_root/cert_root.der",

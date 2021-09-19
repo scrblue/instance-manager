@@ -22,6 +22,8 @@ pub struct LocalConfig {
     pub shared_conf_db_path: PathBuf,
     pub log_file_path: PathBuf,
     pub snapshot_save_dir: PathBuf,
+
+    pub is_core_member: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
