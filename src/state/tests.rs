@@ -243,21 +243,39 @@ async fn log_operations_test() {
         term: 1,
         index: 1,
         payload: EntryPayload::Normal(EntryNormal {
-            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(0)),
+            data: RaftRequest {
+                client: uuid::Uuid::nil(),
+                serial: 0,
+                payload: RaftRequestPayload::ConsoleNetworkRequest(
+                    ConsoleNetworkRequest::Shutdown(0),
+                ),
+            },
         }),
     };
     let le2 = Entry {
         term: 1,
         index: 2,
         payload: EntryPayload::Normal(EntryNormal {
-            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(1)),
+            data: RaftRequest {
+                client: uuid::Uuid::nil(),
+                serial: 0,
+                payload: RaftRequestPayload::ConsoleNetworkRequest(
+                    ConsoleNetworkRequest::Shutdown(1),
+                ),
+            },
         }),
     };
     let le3 = Entry {
         term: 1,
         index: 3,
         payload: EntryPayload::Normal(EntryNormal {
-            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(2)),
+            data: RaftRequest {
+                client: uuid::Uuid::nil(),
+                serial: 0,
+                payload: RaftRequestPayload::ConsoleNetworkRequest(
+                    ConsoleNetworkRequest::Shutdown(2),
+                ),
+            },
         }),
     };
 
@@ -307,14 +325,26 @@ async fn snapshot_tests() {
         term: 1,
         index: 2,
         payload: EntryPayload::Normal(EntryNormal {
-            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(1)),
+            data: RaftRequest {
+                client: uuid::Uuid::nil(),
+                serial: 0,
+                payload: RaftRequestPayload::ConsoleNetworkRequest(
+                    ConsoleNetworkRequest::Shutdown(1),
+                ),
+            },
         }),
     };
     let le3 = Entry {
         term: 1,
         index: 3,
         payload: EntryPayload::Normal(EntryNormal {
-            data: RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(2)),
+            data: RaftRequest {
+                client: uuid::Uuid::nil(),
+                serial: 0,
+                payload: RaftRequestPayload::ConsoleNetworkRequest(
+                    ConsoleNetworkRequest::Shutdown(2),
+                ),
+            },
         }),
     };
 
@@ -329,7 +359,11 @@ async fn snapshot_tests() {
     sm.replicate_to_log(&les[..]).await.unwrap();
     sm.apply_entry_to_state_machine(
         &2,
-        &RaftRequest::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(1)),
+        &RaftRequest {
+            client: uuid::Uuid::nil(),
+            serial: 0,
+            payload: RaftRequestPayload::ConsoleNetworkRequest(ConsoleNetworkRequest::Shutdown(1)),
+        },
     )
     .await
     .unwrap();
