@@ -36,7 +36,6 @@ use super::ConnectionToTracker as FromConnection;
 use super::TrackerToConnection as ToConnection;
 
 // TODO: Error handling
-// TODO: Compare match Request model to separate oneshot senders and receivers per request
 
 #[derive(Debug, Clone)]
 pub struct PeerTrackerHandle {
@@ -125,6 +124,9 @@ pub struct PeerTacker {
     // Used to make comparisons with incoming peers
     core_config: Arc<CoreConfig>,
 
+    // Used to interface with the Raft cluster logic
+    raft: Option<Arc<ImRaft>>,
+
     // Requests to the PeerTracker
     request_receiver: mpsc::Receiver<(Request, Option<oneshot::Sender<ManagerManagerResponse>>)>,
     shutdown_request_receiver: mpsc::Receiver<()>,
@@ -146,6 +148,7 @@ pub struct PeerTacker {
 impl PeerTacker {
     #[tracing::instrument]
     pub fn new(core_config: Arc<CoreConfig>) -> PeerTacker {
+        let raft = None;
         let (request_sender, request_receiver) = mpsc::channel(128);
         let (sdr_sender, shutdown_request_receiver) = mpsc::channel(1);
         let peer_handles = HashMap::new();
@@ -154,6 +157,7 @@ impl PeerTacker {
 
         PeerTacker {
             core_config,
+            raft,
             request_receiver,
             shutdown_request_receiver,
             peer_handles,
@@ -176,6 +180,8 @@ impl PeerTacker {
     pub async fn run(mut self, raft: Arc<ImRaft>) -> Result<()> {
         loop {
             tokio::select! {
+                // Upon receiving a shutdown request, forward the request to every connection
+                // tracked, then break from the loop
                 msg = self.shutdown_request_receiver.recv() => {
                     if let Some(msg) = msg {
                         tracing::debug!("Shutting down peer tracker gracefully");
@@ -190,6 +196,7 @@ impl PeerTacker {
                     }
                 },
 
+                // Upon receiving a request from a PeerTrackerHandle
                 msg = self.request_receiver.recv() => {
                     if let Some(msg) = msg {
                         self.handle_peer_handle_request(msg).await?;
@@ -199,6 +206,7 @@ impl PeerTacker {
                     }
                 },
 
+                // Upon receiving a message from a Peer connection
                 msg = self.from_peers.recv() => {
                     if let Some(msg) = msg {
                         self.handle_peer_message(msg).await?;
@@ -219,7 +227,7 @@ impl PeerTacker {
         msg: (Request, Option<oneshot::Sender<ManagerManagerResponse>>),
     ) -> Result<()> {
         match msg {
-            (Request::NewPeer(id, socket_addr, mut connection), tx) => {
+            (Request::NewPeer(id, socket_addr, mut connection), _no_tx) => {
                 let (sender, receiver) = mpsc::channel::<ToConnection>(128);
 
                 connection
@@ -274,6 +282,10 @@ impl PeerTacker {
             ) => {
                 self.handle_compare_core_config(peer_id, msg_id, cc).await?;
             }
+
+            // When given a Raft related request, forward it to the Raft object, await a response,
+            // and send it back to the peer
+            // TODO: Less tuples, more structs
             (
                 peer_id,
                 FromConnection::Request(InstanceManagerMessage {
@@ -288,7 +300,35 @@ impl PeerTacker {
                             leader_commit,
                         },
                 }),
-            ) => {}
+            ) => {
+                let resp = self
+                    .raft
+                    .as_ref()
+                    .unwrap()
+                    .append_entries(AppendEntriesRequest {
+                        term,
+                        leader_id,
+                        prev_log_index,
+                        prev_log_term,
+                        entries,
+                        leader_commit,
+                    })
+                    .await?;
+
+                // TODO: Some kind of error if the peer_id isn't in the peer_handles
+                if let Some((_join_handle, sender)) = self.peer_handles.get(&peer_id) {
+                    sender
+                        .send(ToConnection::Response(InstanceManagerMessage {
+                            id: msg_id,
+                            payload: ManagerManagerResponse::AppendEntriesResponse {
+                                term: resp.term,
+                                success: resp.success,
+                                conflict_opt: resp.conflict_opt.map(|co| ((co.term, co.index))),
+                            },
+                        }))
+                        .await?;
+                }
+            }
             (
                 peer_id,
                 FromConnection::Request(InstanceManagerMessage {
@@ -304,7 +344,31 @@ impl PeerTacker {
                             done,
                         },
                 }),
-            ) => {}
+            ) => {
+                let resp = self
+                    .raft
+                    .as_ref()
+                    .unwrap()
+                    .install_snapshot(InstallSnapshotRequest {
+                        term,
+                        leader_id,
+                        last_included_index,
+                        last_included_term,
+                        offset,
+                        data,
+                        done,
+                    })
+                    .await?;
+
+                if let Some((_join_handle, sender)) = self.peer_handles.get(&peer_id) {
+                    sender
+                        .send(ToConnection::Response(InstanceManagerMessage {
+                            id: msg_id,
+                            payload: ManagerManagerResponse::InstallSnapshotResponse(resp.term),
+                        }))
+                        .await?;
+                }
+            }
             (
                 peer_id,
                 FromConnection::Request(InstanceManagerMessage {
@@ -317,55 +381,28 @@ impl PeerTacker {
                             last_log_term,
                         },
                 }),
-            ) => {}
+            ) => {
+                let VoteResponse { term, vote_granted } = self
+                    .raft
+                    .as_ref()
+                    .unwrap()
+                    .vote(VoteRequest {
+                        term,
+                        candidate_id,
+                        last_log_index,
+                        last_log_term,
+                    })
+                    .await?;
 
-            (
-                peer_id,
-                FromConnection::Response(InstanceManagerMessage {
-                    id: msg_id,
-                    payload: ManagerManagerResponse::RequireCoreConfig,
-                }),
-            ) => {}
-            (
-                peer_id,
-                FromConnection::Response(InstanceManagerMessage {
-                    id: msg_id,
-                    payload: ManagerManagerResponse::ConnectionAccepted,
-                }),
-            ) => {}
-            (
-                peer_id,
-                FromConnection::Response(InstanceManagerMessage {
-                    id: msg_id,
-                    payload: ManagerManagerResponse::ConnectionDenied,
-                }),
-            ) => {}
-            (
-                peer_id,
-                FromConnection::Response(InstanceManagerMessage {
-                    id: msg_id,
-                    payload:
-                        ManagerManagerResponse::AppendEntriesResponse {
-                            term,
-                            success,
-                            conflict_opt,
-                        },
-                }),
-            ) => {}
-            (
-                peer_id,
-                FromConnection::Response(InstanceManagerMessage {
-                    id: msg_id,
-                    payload: ManagerManagerResponse::InstallSnapshotResponse(peer_snapshot_id),
-                }),
-            ) => {}
-            (
-                peer_id,
-                FromConnection::Response(InstanceManagerMessage {
-                    id: msg_id,
-                    payload: ManagerManagerResponse::VoteResponse { term, vote_granted },
-                }),
-            ) => {}
+                if let Some((_join_handle, sender)) = self.peer_handles.get(&peer_id) {
+                    sender
+                        .send(ToConnection::Response(InstanceManagerMessage {
+                            id: msg_id,
+                            payload: ManagerManagerResponse::VoteResponse { term, vote_granted },
+                        }))
+                        .await?;
+                }
+            }
         }
 
         Ok(())

@@ -10,7 +10,6 @@ pub mod peer_tracker;
 #[derive(Debug)]
 pub enum ConnectionToTracker {
     Request(InstanceManagerMessage<ManagerManagerRequest>),
-    Response(InstanceManagerMessage<ManagerManagerResponse>),
 }
 
 pub enum TrackerToConnection {

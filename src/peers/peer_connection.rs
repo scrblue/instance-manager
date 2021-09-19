@@ -19,6 +19,9 @@ pub async fn handle_peer_connection(
     id: u64,
     mut core_config_matches: Option<bool>,
 ) {
+    // With every request, a oneshot::Sender is sent through which the response is to be sent;
+    // this maps the request ID to the transmitter so when the response arrives, it can be directed
+    // to the right location
     let mut unfulfilled_requests: HashMap<u64, oneshot::Sender<ManagerManagerResponse>> =
         HashMap::new();
 
@@ -29,6 +32,10 @@ pub async fn handle_peer_connection(
             msg = from_tracker.recv() => {
                 match msg {
                     Some(FromTracker::Shutdown) => break,
+
+                    // Upon receiving a request from the PeerTracker, insert the Sender into the
+                    // unfulfilled_requests map, then send the message to the peer that this thread
+                    // manages
                     Some(FromTracker::Request(mmr, tx)) => {
                         unfulfilled_requests.insert(mmr.id, tx);
 
@@ -39,6 +46,9 @@ pub async fn handle_peer_connection(
                         };
                         connection.send_message(&mmr).await.unwrap();
                     }
+
+                    // Upon receiving a response to the PeerTracker, simply send the message to the
+                    // peer
                     Some(FromTracker::Response(mmr)) => {
                         tracing::debug!("Sending message {:?}", mmr);
                         let mmr = InstanceManagerMessage {
@@ -47,6 +57,9 @@ pub async fn handle_peer_connection(
                         };
                         connection.send_message(&mmr).await.unwrap();
                     }
+
+                    // The following two messages from the PeerTracker indicate whether or not this
+                    // connection is from a valid peer
                     Some(FromTracker::CoreConfigMatch(id)) => {
                         core_config_matches = Some(true);
                         connection.send_message(&InstanceManagerMessage{
@@ -66,6 +79,7 @@ pub async fn handle_peer_connection(
                         }).await.unwrap();
                         // TODO: break here?
                     }
+
                     None => {
                         tracing::error!("Channel from tracker is closed");
                         break;
@@ -74,7 +88,13 @@ pub async fn handle_peer_connection(
             },
             msg = connection.read_message::<InstanceManagerMessage<ManagerManagerPayload>>() => {
                 match core_config_matches {
+                    // If the CoreConfig does match, requests and responses can be handled as
+                    // expected
                     Some(true) => match msg {
+
+                        // Upon receiving a response from the peer, fetch the Sender from the
+                        // unfulfilled_requests map corresponding to the request ID, and send
+                        // the response through that
                         Ok(InstanceManagerMessage {
                             id,
                             payload: ManagerManagerPayload::Response(resp),
@@ -87,16 +107,10 @@ pub async fn handle_peer_connection(
 
                             if let Some(tx) = unfulfilled_requests.remove(&id) {
                                 tx.send(resp).unwrap();
-                            } else {
-                                to_tracker.send((id, ToTracker::Response(
-                                    InstanceManagerMessage {
-                                        id,
-                                        payload: resp,
-                                    }
-                                ))).await.unwrap();
                             }
                         }
 
+                        // Upon receiving a request, simply forward it to the PeerTracker
                         Ok(InstanceManagerMessage {
                             id,
                             payload: ManagerManagerPayload::Request(req),
@@ -113,11 +127,16 @@ pub async fn handle_peer_connection(
                         }
                     },
 
+                    // If the CoreConfig does not match, then the peer is not allowed to enter the
+                    // cluster and thus no requests or responses should be accepted
                     Some(false) => {
                         connection.send_message(&ManagerManagerResponse::ConnectionDenied).await.unwrap();
                         // TODO: Let retry with new CoreConfig?
                     },
 
+                    // If the CoreConfig has not been compared yet, only forward the request if it
+                    // is a CompareCoreConfig request, otherwise send a response stating that the
+                    // CoreConfig must be compared
                     None => {
                         if let Ok(InstanceManagerMessage {
                             id,
