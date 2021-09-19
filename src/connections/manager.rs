@@ -43,6 +43,9 @@ pub struct ConnectionManager {
     /// itself when connecting to other peers on the network
     listener_addr: SocketAddr,
 
+    /// The Raft IDs of all the initial connections
+    initial_connection_ids: Vec<u64>,
+
     /// The Raft ID and listener_addr of peers that the ConnectionManager will attempt to connect to
     form_connections_with: Vec<(u64, SocketAddr)>,
     /// The Raft ID and listener_addr of peers who the ConnectionManager has failed to connect to,
@@ -71,6 +74,7 @@ impl ConnectionManager {
 
         let form_connections_with = initial_connections;
         let await_connections_from = Vec::new();
+        let initial_connection_ids = form_connections_with.iter().map(|e| e.0).collect();
 
         let (handle_sender_master, from_handle) = mpsc::channel(32);
 
@@ -81,6 +85,7 @@ impl ConnectionManager {
             tcp_listener,
             tls_acceptor,
             listener_addr,
+            initial_connection_ids,
             form_connections_with,
             await_connections_from,
             from_handle,
@@ -103,6 +108,11 @@ impl ConnectionManager {
         // message from the client identifying the type of connection and, thus, whether it should
         // be routed to the PeerTracker, InstanceTracker, or ConsoleTracker
         let mut unmanaged_connections = FuturesUnordered::new();
+
+        // When all configured connections have been formed, the cluster may initialize, so notify
+        // the PeerTracker
+        let mut all_connections_formed = false;
+
         loop {
             let loop_result;
             match (
@@ -213,6 +223,22 @@ impl ConnectionManager {
                     }
                 }
             }
+
+            if let Err(e) = loop_result {
+                tracing::error!("Error in ConnectionManager loop: {}", e);
+            }
+
+            if !all_connections_formed
+                && self.form_connections_with.is_empty()
+                && self.await_connections_from.is_empty()
+            {
+                self.peer_tracker_handle
+                    .as_ref()
+                    .unwrap()
+                    .initialize(self.initial_connection_ids.drain(..).collect())
+                    .await?;
+                all_connections_formed = true;
+            }
         }
 
         Ok(())
@@ -223,14 +249,15 @@ impl ConnectionManager {
         &mut self,
         msg: Option<(Request, oneshot::Sender<Response>)>,
     ) -> LoopEnd {
+        // TODO: Error handling
         match msg {
             Some((Request::Shutdown, tx)) => {
-                tx.send(Response::Ok);
+                tx.send(Response::Ok).unwrap();
                 tracing::debug!("ConnectionManager shutting down gracefully");
                 LoopEnd::Break
             }
 
-            Some((unhandled, tx)) => {
+            Some((unhandled, _tx)) => {
                 tracing::error!("Unimplemented request: {:?}", unhandled);
                 LoopEnd::Continue
             }

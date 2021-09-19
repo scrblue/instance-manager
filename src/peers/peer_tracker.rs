@@ -27,8 +27,18 @@ use PeerTrackerResponse as Response;
 
 #[derive(Debug)]
 pub enum PeerTrackerRequest {
-    NewPeer(u64, SocketAddr, TlsConnection<TcpStream>),
-    ManagerManagerRequest(u64, ManagerManagerRequest),
+    NewPeer {
+        id: u64,
+        socket_addr: SocketAddr,
+        connection: TlsConnection<TcpStream>,
+    },
+    InitializeCluster {
+        ids: Vec<u64>,
+    },
+    ManagerManagerRequest {
+        target_id: u64,
+        request: ManagerManagerRequest,
+    },
 }
 use PeerTrackerRequest as Request;
 
@@ -57,7 +67,22 @@ impl PeerTrackerHandle {
         connection: TlsConnection<TcpStream>,
     ) -> Result<()> {
         self.request_sender
-            .send((Request::NewPeer(id, public_addr, connection), None))
+            .send((
+                Request::NewPeer {
+                    id,
+                    socket_addr: public_addr,
+                    connection,
+                },
+                None,
+            ))
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn initialize(&self, ids: Vec<u64>) -> Result<()> {
+        self.request_sender
+            .send((Request::InitializeCluster { ids }, None))
             .await?;
 
         Ok(())
@@ -74,7 +99,10 @@ impl RaftNetwork<RaftRequest> for PeerTrackerHandle {
         let (resp_send, resp_recv) = oneshot::channel::<ManagerManagerResponse>();
         self.request_sender
             .send((
-                Request::ManagerManagerRequest(target, rpc.into()),
+                Request::ManagerManagerRequest {
+                    target_id: target,
+                    request: rpc.into(),
+                },
                 Some(resp_send),
             ))
             .await?;
@@ -93,7 +121,10 @@ impl RaftNetwork<RaftRequest> for PeerTrackerHandle {
         let (resp_send, resp_recv) = oneshot::channel::<ManagerManagerResponse>();
         self.request_sender
             .send((
-                Request::ManagerManagerRequest(target, rpc.into()),
+                Request::ManagerManagerRequest {
+                    target_id: target,
+                    request: rpc.into(),
+                },
                 Some(resp_send),
             ))
             .await?;
@@ -108,7 +139,10 @@ impl RaftNetwork<RaftRequest> for PeerTrackerHandle {
         let (resp_send, resp_recv) = oneshot::channel::<ManagerManagerResponse>();
         self.request_sender
             .send((
-                Request::ManagerManagerRequest(target, rpc.into()),
+                Request::ManagerManagerRequest {
+                    target_id: target,
+                    request: rpc.into(),
+                },
                 Some(resp_send),
             ))
             .await?;
@@ -126,6 +160,10 @@ pub struct PeerTacker {
 
     // Used to interface with the Raft cluster logic
     raft: Option<Arc<ImRaft>>,
+
+    // Whether the request to initialize the Raft formation has been received -- if Some, it will
+    // only actually execute after all the peers are confirmed
+    init_request_received: Option<Vec<u64>>,
 
     // Requests to the PeerTracker
     request_receiver: mpsc::Receiver<(Request, Option<oneshot::Sender<ManagerManagerResponse>>)>,
@@ -149,6 +187,7 @@ impl PeerTacker {
     #[tracing::instrument]
     pub fn new(core_config: Arc<CoreConfig>) -> PeerTacker {
         let raft = None;
+        let init_request_received = None;
         let (request_sender, request_receiver) = mpsc::channel(128);
         let (sdr_sender, shutdown_request_receiver) = mpsc::channel(1);
         let peer_handles = HashMap::new();
@@ -158,6 +197,7 @@ impl PeerTacker {
         PeerTacker {
             core_config,
             raft,
+            init_request_received,
             request_receiver,
             shutdown_request_receiver,
             peer_handles,
@@ -217,6 +257,34 @@ impl PeerTacker {
 
                 },
             }
+
+            // If the init request has been received, then check if all IDs given have been
+            // confirmed -- if they have been initialize the Raft cluster, then set the init
+            // request to None to prevent initialization from occuring multiple times
+
+            // TODO: Some kind of error if any of the `CoreConfig`s don't match
+            let mut nullify_init_request = false;
+            if let Some(ids) = &self.init_request_received {
+                let mut all_ids_in = true;
+
+                for id in ids {
+                    if !self.peer_handles.contains_key(id) {
+                        all_ids_in = false;
+                        nullify_init_request = true;
+                    }
+                }
+
+                if all_ids_in {
+                    self.raft
+                        .as_ref()
+                        .unwrap()
+                        .initialize(ids.iter().map(|e| *e).collect())
+                        .await?;
+                }
+            }
+            if nullify_init_request {
+                self.init_request_received = None;
+            }
         }
 
         Ok(())
@@ -227,7 +295,14 @@ impl PeerTacker {
         msg: (Request, Option<oneshot::Sender<ManagerManagerResponse>>),
     ) -> Result<()> {
         match msg {
-            (Request::NewPeer(id, socket_addr, mut connection), _no_tx) => {
+            (
+                Request::NewPeer {
+                    id,
+                    socket_addr,
+                    mut connection,
+                },
+                _no_tx,
+            ) => {
                 let (sender, receiver) = mpsc::channel::<ToConnection>(128);
 
                 connection
@@ -251,10 +326,17 @@ impl PeerTacker {
                 );
             }
 
-            (Request::ManagerManagerRequest(id, mmr), tx) => {
-                if let Some((_join_handle, sender)) = self.peer_handles.get(&id) {
+            (Request::InitializeCluster { ids }, _no_tx) => {
+                self.init_request_received = Some(ids);
+            }
+
+            (Request::ManagerManagerRequest { target_id, request }, tx) => {
+                if let Some((_join_handle, sender)) = self.peer_handles.get(&target_id) {
                     let id = rand::thread_rng().gen::<u64>();
-                    let mmr = InstanceManagerMessage { id, payload: mmr };
+                    let mmr = InstanceManagerMessage {
+                        id,
+                        payload: request,
+                    };
 
                     sender.send(ToConnection::Request(mmr, tx.unwrap())).await?;
                 }
