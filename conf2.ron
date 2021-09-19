@@ -1,6 +1,6 @@
 #![enable(implicit_some)]
 {
-	log_level: "trace",
+	log_level: "debug",
 
 	// TODO: OpenTelemetry info
 	
@@ -13,7 +13,7 @@
 	server_key_password: "test",
 	
 	shared_conf_db_path: "./test2.db",
-	log_file_path: "./test1_log.db",
+	log_file_path: "./test2_log.db",
 	snapshot_save_dir: "./",
 	is_core_member: true,
 

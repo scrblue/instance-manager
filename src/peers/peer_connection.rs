@@ -16,7 +16,7 @@ pub async fn handle_peer_connection(
     to_tracker: mpsc::Sender<(u64, ToTracker)>,
     mut from_tracker: mpsc::Receiver<FromTracker>,
     mut connection: TlsConnection<TcpStream>,
-    id: u64,
+    self_id: u64,
     mut core_config_matches: Option<bool>,
 ) {
     // With every request, a oneshot::Sender is sent through which the response is to be sent;
@@ -27,6 +27,8 @@ pub async fn handle_peer_connection(
 
     // TODO: From/Into for ManagerManagerRequest -> ManagerManagerPayload and ManagerManagerResponse
     // -> ManagerManagerPayload
+    let from_tracker = &mut from_tracker;
+    let connection = &mut connection;
     loop {
         tokio::select! {
             msg = from_tracker.recv() => {
@@ -39,7 +41,7 @@ pub async fn handle_peer_connection(
                     Some(FromTracker::Request(mmr, tx)) => {
                         unfulfilled_requests.insert(mmr.id, tx);
 
-                        tracing::debug!("Sending message {:?}", mmr);
+                        tracing::trace!("Sending message {:?}", mmr);
                         let mmr = InstanceManagerMessage {
                             id: mmr.id,
                             payload: ManagerManagerPayload::Request(mmr.payload),
@@ -50,7 +52,7 @@ pub async fn handle_peer_connection(
                     // Upon receiving a response to the PeerTracker, simply send the message to the
                     // peer
                     Some(FromTracker::Response(mmr)) => {
-                        tracing::debug!("Sending message {:?}", mmr);
+                        tracing::trace!("Sending message {:?}", mmr);
                         let mmr = InstanceManagerMessage {
                             id: mmr.id,
                             payload: ManagerManagerPayload::Response(mmr.payload),
@@ -99,7 +101,7 @@ pub async fn handle_peer_connection(
                             id,
                             payload: ManagerManagerPayload::Response(resp),
                         }) =>  {
-                            tracing::info!(
+                            tracing::trace!(
                                 "Received response from connection for request {}: {:?}",
                                 id,
                                 resp,
@@ -115,9 +117,9 @@ pub async fn handle_peer_connection(
                             id,
                             payload: ManagerManagerPayload::Request(req),
                         }) => {
-                            tracing::info!("Received from connection: {:?}", req);
+                            tracing::trace!("Received from connection: {:?}", req);
                             to_tracker.send(
-                                (id, ToTracker::Request(
+                                (self_id, ToTracker::Request(
                                     InstanceManagerMessage {id, payload: req}))).await.unwrap();
                         }
 
@@ -139,23 +141,29 @@ pub async fn handle_peer_connection(
                     // CoreConfig must be compared
                     None => {
                         if let Ok(InstanceManagerMessage {
-                            id,
+                            id: msg_id,
                             payload: ManagerManagerPayload::Request(
                                 ManagerManagerRequest::CompareCoreConfig(cc))
                         }) = msg {
+                            tracing::trace!("Received CompareCoreConfig from peer");
                             to_tracker.send((
-                                id,
+                                self_id,
                                 ToTracker::Request(
                                     InstanceManagerMessage {
-                                        id,
+                                        id: msg_id,
                                         payload:
                                             ManagerManagerRequest::CompareCoreConfig(cc)
                                     }
                                 ))).await.unwrap();
                         } else {
-                            connection.send_message(
-                                &ManagerManagerResponse::RequireCoreConfig
-                            ).await.unwrap();
+                             //connection.send_message(
+                               	//&InstanceManagerMessage {
+                                    // id: 0,
+                                    // payload: ManagerManagerPayload::Response(
+                                    // 	ManagerManagerResponse::RequireCoreConfig
+                                    // )
+                               //	}
+                             //).await.unwrap();
                         }
                     }
                 }

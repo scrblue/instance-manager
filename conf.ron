@@ -1,6 +1,6 @@
 #![enable(implicit_some)]
 {
-	log_level: "trace",
+	log_level: "debug",
 
 	// TODO: OpenTelemetry info
 	

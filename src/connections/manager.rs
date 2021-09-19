@@ -43,8 +43,8 @@ pub struct ConnectionManager {
     /// itself when connecting to other peers on the network
     listener_addr: SocketAddr,
 
-    /// The Raft IDs of all the initial connections
-    initial_connection_ids: Vec<u64>,
+    /// The Raft IDs of all the peers including this node
+    all_raft_ids: Vec<u64>,
 
     /// The Raft ID and listener_addr of peers that the ConnectionManager will attempt to connect to
     form_connections_with: Vec<(u64, SocketAddr)>,
@@ -68,6 +68,7 @@ impl ConnectionManager {
         server_config: Arc<ServerConfig>,
         listener_addr: SocketAddr,
         form_connections: bool,
+        self_raft_id: u64,
         initial_connections: Vec<(u64, SocketAddr)>,
     ) -> Result<ConnectionManager> {
         let tcp_listener = TcpListener::bind(listener_addr).await?;
@@ -78,7 +79,8 @@ impl ConnectionManager {
         } else {
             (Vec::new(), initial_connections)
         };
-        let initial_connection_ids = form_connections_with.iter().map(|e| e.0).collect();
+        let mut all_raft_ids: Vec<u64> = form_connections_with.iter().map(|e| e.0).collect();
+        all_raft_ids.push(self_raft_id);
 
         let (handle_sender_master, from_handle) = mpsc::channel(32);
 
@@ -89,7 +91,7 @@ impl ConnectionManager {
             tcp_listener,
             tls_acceptor,
             listener_addr,
-            initial_connection_ids,
+            all_raft_ids,
             form_connections_with,
             await_connections_from,
             from_handle,
@@ -239,7 +241,7 @@ impl ConnectionManager {
                 self.peer_tracker_handle
                     .as_ref()
                     .unwrap()
-                    .initialize(self.initial_connection_ids.drain(..).collect())
+                    .initialize(self.all_raft_ids.drain(..).collect())
                     .await?;
                 all_connections_formed = true;
             }
@@ -299,8 +301,9 @@ impl ConnectionManager {
                                 false
                             }
                         });
-
-                if index.is_none() {
+                if let Some(index) = index {
+                    self.form_connections_with.remove(index);
+                } else {
                     index =
                         self.await_connections_from
                             .iter()
@@ -313,6 +316,10 @@ impl ConnectionManager {
                                     false
                                 }
                             });
+
+                    if let Some(index) = index {
+                        self.await_connections_from.remove(index);
+                    }
                 }
 
                 if let Some(index) = index {
@@ -399,6 +406,9 @@ impl ConnectionManager {
                 .send_message(&Greeting::Peer(self.listener_addr))
                 .await?;
 
+			// FIXME: No hacks
+			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+			
             self.peer_tracker_handle
                 .as_ref()
                 .unwrap()
@@ -418,6 +428,7 @@ impl ConnectionManager {
             let removed = self.form_connections_with.remove(index);
 
             if !connected {
+                tracing::trace!("Now awaiting connection from: {:?}", removed);
                 self.await_connections_from.push(removed);
             }
         }

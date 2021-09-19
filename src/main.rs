@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     tokio::spawn(io::handle_io(io_s));
 
     // Prepare to spawn peer tracking thread
-    let peer_tracker = PeerTacker::new(Arc::new(core_conf));
+    let peer_tracker = PeerTacker::new(Arc::new(core_conf), self_id.unwrap());
     let peer_tracker_handle = peer_tracker.handle();
     let raft_peer_handle = Arc::new(peer_tracker.handle());
 
@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
         server_conf,
         listener_socket_addr,
         local_conf.is_core_member,
+        self_id.unwrap(),
         peers,
     )
     .await?;
