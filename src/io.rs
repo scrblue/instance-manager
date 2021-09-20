@@ -10,7 +10,7 @@ pub enum IoToMain {
     ManagerRequest(ConsoleManagerRequest),
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip(to_main))]
 pub async fn handle_io(to_main: mpsc::Sender<IoToMain>) {
     to_main.send(IoToMain::ProcessStarted).await.unwrap();
 
@@ -28,6 +28,7 @@ pub async fn handle_io(to_main: mpsc::Sender<IoToMain>) {
 
                 other => {
                     tracing::error!("Unrecognized command: {}", other);
+                    command.clear();
                 }
             },
             Err(e) => {
