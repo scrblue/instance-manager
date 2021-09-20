@@ -76,7 +76,8 @@ impl PeerTrackerHandle {
                 },
                 Some(resp_send),
             ))
-            .await.unwrap();
+            .await
+            .unwrap();
 
         let _ = resp_recv.await.unwrap();
 
@@ -86,7 +87,8 @@ impl PeerTrackerHandle {
     pub async fn initialize(&self, ids: Vec<u64>) -> Result<()> {
         self.request_sender
             .send((Request::InitializeCluster { ids }, None))
-            .await.unwrap();
+            .await
+            .unwrap();
 
         Ok(())
     }
@@ -108,12 +110,14 @@ impl RaftNetwork<RaftRequest> for PeerTrackerHandle {
                 },
                 Some(resp_send),
             ))
-            .await.unwrap();
+            .await
+            .unwrap();
 
         resp_recv
             .await
             .context("Error receiving response for AppendEntriesRequest")
-            .map(|resp| Ok(resp.try_into().unwrap())).unwrap()
+            .map(|resp| Ok(resp.try_into().unwrap()))
+            .unwrap()
     }
 
     async fn install_snapshot(
@@ -130,12 +134,14 @@ impl RaftNetwork<RaftRequest> for PeerTrackerHandle {
                 },
                 Some(resp_send),
             ))
-            .await.unwrap();
+            .await
+            .unwrap();
 
         resp_recv
             .await
             .context("Error receiving response for InstallSnapshotRequest")
-            .map(|resp| Ok(resp.try_into().unwrap())).unwrap()
+            .map(|resp| Ok(resp.try_into().unwrap()))
+            .unwrap()
     }
 
     async fn vote(&self, target: NodeId, rpc: VoteRequest) -> Result<VoteResponse> {
@@ -148,12 +154,14 @@ impl RaftNetwork<RaftRequest> for PeerTrackerHandle {
                 },
                 Some(resp_send),
             ))
-            .await.unwrap();
+            .await
+            .unwrap();
 
         resp_recv
             .await
             .context("Error receiving response for InstallSnapshotRequest")
-            .map(|resp| Ok(resp.try_into().unwrap())).unwrap()
+            .map(|resp| Ok(resp.try_into().unwrap()))
+            .unwrap()
     }
 }
 
@@ -284,7 +292,8 @@ impl PeerTacker {
                 if all_ids_in {
                     nullify_init_request = true;
                     tracing::info!("Initializing cluster");
-                    let _ = self.raft
+                    let _ = self
+                        .raft
                         .as_ref()
                         .unwrap()
                         .initialize(ids.iter().map(|e| *e).collect())
@@ -337,7 +346,10 @@ impl PeerTacker {
                             self.core_config.as_ref().clone(),
                         ),
                     };
-                    sender.send(ToConnection::Request(mmr, tx.unwrap())).await.unwrap();
+                    sender
+                        .send(ToConnection::Request(mmr, tx.unwrap()))
+                        .await
+                        .unwrap();
                 }
             }
 
@@ -353,7 +365,10 @@ impl PeerTacker {
                         payload: request,
                     };
 
-                    sender.send(ToConnection::Request(mmr, tx.unwrap())).await.unwrap();
+                    sender
+                        .send(ToConnection::Request(mmr, tx.unwrap()))
+                        .await
+                        .unwrap();
                 }
             }
         }
@@ -377,7 +392,9 @@ impl PeerTacker {
                     payload: ManagerManagerRequest::CompareCoreConfig(cc),
                 }),
             ) => {
-                self.handle_compare_core_config(peer_id, msg_id, cc).await.unwrap();
+                self.handle_compare_core_config(peer_id, msg_id, cc)
+                    .await
+                    .unwrap();
             }
 
             // When given a Raft related request, forward it to the Raft object, await a response,
@@ -410,7 +427,8 @@ impl PeerTacker {
                         entries,
                         leader_commit,
                     })
-                    .await.unwrap();
+                    .await
+                    .unwrap();
 
                 // TODO: Some kind of error if the peer_id isn't in the peer_handles
                 if let Some((_join_handle, sender)) = self.peer_handles.get(&peer_id) {
@@ -423,7 +441,8 @@ impl PeerTacker {
                                 conflict_opt: resp.conflict_opt.map(|co| ((co.term, co.index))),
                             },
                         }))
-                        .await.unwrap();
+                        .await
+                        .unwrap();
                 }
             }
             (
@@ -455,7 +474,8 @@ impl PeerTacker {
                         data,
                         done,
                     })
-                    .await.unwrap();
+                    .await
+                    .unwrap();
 
                 if let Some((_join_handle, sender)) = self.peer_handles.get(&peer_id) {
                     sender
@@ -463,7 +483,8 @@ impl PeerTacker {
                             id: msg_id,
                             payload: ManagerManagerResponse::InstallSnapshotResponse(resp.term),
                         }))
-                        .await.unwrap();
+                        .await
+                        .unwrap();
                 }
             }
             (
@@ -489,7 +510,8 @@ impl PeerTacker {
                         last_log_index,
                         last_log_term,
                     })
-                    .await.unwrap();
+                    .await
+                    .unwrap();
 
                 if let Some((_join_handle, sender)) = self.peer_handles.get(&peer_id) {
                     sender
@@ -497,7 +519,8 @@ impl PeerTacker {
                             id: msg_id,
                             payload: ManagerManagerResponse::VoteResponse { term, vote_granted },
                         }))
-                        .await.unwrap();
+                        .await
+                        .unwrap();
                 }
             }
         }
@@ -515,10 +538,16 @@ impl PeerTacker {
         if let Some((_join_handle, sender)) = self.unconfirmed_peer_handles.get(&peer_id) {
             if &cc == self.core_config.as_ref() {
                 delete_from_unconfirmed = true;
-                sender.send(ToConnection::CoreConfigMatch(msg_id)).await.unwrap();
+                sender
+                    .send(ToConnection::CoreConfigMatch(msg_id))
+                    .await
+                    .unwrap();
                 tracing::debug!("CoreConfig matches");
             } else {
-                sender.send(ToConnection::CoreConfigNoMatch(msg_id)).await.unwrap();
+                sender
+                    .send(ToConnection::CoreConfigNoMatch(msg_id))
+                    .await
+                    .unwrap();
                 tracing::error!("CoreConfig doesn't match");
             }
         }

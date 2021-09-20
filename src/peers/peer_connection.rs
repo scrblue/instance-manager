@@ -157,7 +157,7 @@ pub async fn handle_peer_connection(
                                 ))).await.unwrap();
                         } else {
                              //connection.send_message(
-                               	//&InstanceManagerMessage {
+                                   //&InstanceManagerMessage {
                                     // id: 0,
                                     // payload: ManagerManagerPayload::Response(
                                     // 	ManagerManagerResponse::RequireCoreConfig
