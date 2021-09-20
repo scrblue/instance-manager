@@ -373,9 +373,10 @@ impl RaftStorage<RaftRequest, RaftResponse> for StateManager {
                 ConsoleNetworkRequest::SoftShutdown(id) => {
                     anyhow::bail!("Unimplemented")
                 }
-                ConsoleNetworkRequest::UpdateInstance {
+                ConsoleNetworkRequest::RunMethod {
                     manager,
                     instance_name,
+                    method_name,
                 } => {
                     anyhow::bail!("Unimplemented")
                 }
