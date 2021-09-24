@@ -406,9 +406,6 @@ impl ConnectionManager {
                 .send_message(&Greeting::Peer(self.listener_addr))
                 .await?;
 
-			// FIXME: No hacks
-			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-			
             self.peer_tracker_handle
                 .as_ref()
                 .unwrap()
