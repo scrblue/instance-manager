@@ -1,12 +1,16 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, net::IpAddr, path::PathBuf};
+use std::{net::{IpAddr, SocketAddr}, path::PathBuf};
 use tokio::fs;
 use tracing::instrument;
 
-// Defines CoreConfig, DistributedConfig, InstanceConf, InstanceInstallMethod, and GitVersion
-// All part of configuration, just used in the messages that need to be shared
-pub use common_model::instance_management::manager_configuration::*;
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CoreConfig {
+    pub root_ca_cert: PathBuf,
+    pub node_ca_cert: PathBuf,
+    pub admin_ca_cert: PathBuf,
+    pub peers: Vec<(u64, SocketAddr)>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LocalConfig {

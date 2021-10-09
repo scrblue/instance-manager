@@ -1,4 +1,4 @@
-use crate::{messages::*, peers::peer_tracker::PeerTrackerHandle, ImRaft};
+use crate::{messages::*, actors::peers::peer_tracker::PeerTrackerHandle, ImRaft};
 
 use anyhow::{Context, Result};
 use futures::stream::{futures_unordered::FuturesUnordered, StreamExt};

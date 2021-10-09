@@ -1,5 +1,3 @@
-use common_model::{instance_management::ServerHealth, InstancePath};
-
 use anyhow::Result;
 use async_raft::raft::Raft;
 use indradb::{Datastore, Transaction};
@@ -9,24 +7,22 @@ use tokio::{
     sync::mpsc,
 };
 
+mod actors;
 mod configuration;
-mod connections;
-mod io;
 mod messages;
-mod peers;
 mod state;
 mod tls;
 
-use peers::peer_tracker::*;
+use actors::peers::peer_tracker::*;
 use state::StateManager;
 
-use io::IoToMain as FromIo;
+use actors::io::IoToMain as FromIo;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // The local configuration and shared configuration are loaded from a file specified by the
     // argument given to the program on launch
-    let (local_conf, core_conf) = configuration::setup().await?;
+    let (local_conf, core_conf) = configuration::manager::setup().await?;
 
     // Setup logging
     let log_level = tracing::Level::from_str(local_conf.log_level.as_deref().unwrap_or("INFO"))?;
@@ -78,7 +74,7 @@ async fn main() -> Result<()> {
 
     // Spawn IO thread
     let (io_s, mut io_r) = mpsc::channel::<FromIo>(128);
-    tokio::spawn(io::handle_io(io_s));
+    tokio::spawn(actors::io::handle_io(io_s));
 
     // Prepare to spawn peer tracking thread
     let peer_tracker = PeerTacker::new(Arc::new(core_conf), self_id.unwrap());
@@ -89,7 +85,7 @@ async fn main() -> Result<()> {
     // Spawn console tracking thread
 
     // Spawn connection managment thread
-    let connection_manager = connections::manager::ConnectionManager::new(
+    let connection_manager = actors::connections::manager::ConnectionManager::new(
         client_conf,
         server_conf,
         listener_socket_addr,
@@ -118,7 +114,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             msg = io_r.recv() => {
                 match msg {
-                    Some(FromIo::NetworkRequest(messages::ConsoleNetworkRequest::Shutdown(_))) => {
+                    Some(FromIo::NetworkRequest(messages::console_network::ConsoleNetworkRequest::Shutdown(_))) => {
                         break;
                     },
                     None => {

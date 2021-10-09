@@ -41,7 +41,7 @@ dependencies = [
  "rand 0.7.3",
  "serde",
  "thiserror",
- "tokio 1.8.1",
+ "tokio 1.12.0",
  "tracing",
  "tracing-futures",
 ]
@@ -203,7 +203,6 @@ dependencies = [
  "async-raft",
  "bincode",
  "chrono",
- "common_model",
  "futures 0.3.16",
  "indradb-lib",
  "rand 0.8.4",
@@ -213,7 +212,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempdir",
- "tokio 1.8.1",
+ "tokio 1.12.0",
  "tokio-rustls",
  "tokio-tls",
  "tracing",
@@ -223,16 +222,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webpki",
-]
-
-[[package]]
-name = "common_model"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-raft",
- "serde",
- "uuid",
 ]
 
 [[package]]
@@ -1203,9 +1192,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.66"
+version = "1.0.68"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "336b10da19a12ad094b59d870ebde26a45402e5b470add4b5fd03c5048a32127"
+checksum = "0f690853975602e1bfe1ccbf50504d67174e3bcf340f23b5ea9992e0587a52d8"
 dependencies = [
  "itoa",
  "ryu",
@@ -1364,9 +1353,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.8.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98c8b05dc14c75ea83d63dd391100353789f5f24b8b3866542a5e85c8be8e985"
+checksum = "c2c2416fdedca8443ae44b4527de1ea633af61d8f7169ffa6e72c5b53d24efcc"
 dependencies = [
  "autocfg",
  "bytes 1.0.1",
@@ -1472,7 +1461,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc6844de72e57df1980054b38be3a9f4702aba4858be64dd700181a8a6d0e1b6"
 dependencies = [
  "rustls",
- "tokio 1.8.1",
+ "tokio 1.12.0",
  "webpki",
 ]
 
@@ -1537,8 +1526,10 @@ dependencies = [
  "bincode",
  "rustls",
  "serde",
- "tokio 1.8.1",
+ "serde_json",
+ "tokio 1.12.0",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
  "webpki",
 ]
@@ -1574,6 +1565,20 @@ dependencies = [
  "tokio-codec",
  "tokio-io",
  "tokio-reactor",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d3725d3efa29485e87311c5b699de63cde14b00ed4d256b8318aa30ca452cd"
+dependencies = [
+ "bytes 1.0.1",
+ "futures-core",
+ "futures-sink",
+ "log",
+ "pin-project-lite",
+ "tokio 1.12.0",
 ]
 
 [[package]]

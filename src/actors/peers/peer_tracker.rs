@@ -1,6 +1,6 @@
 use super::peer_connection;
 use crate::{
-    configuration::CoreConfig,
+    configuration::manager::CoreConfig,
     messages::{
         InstanceManagerMessage, ManagerManagerRequest, ManagerManagerResponse, RaftRequest,
     },
@@ -9,7 +9,6 @@ use crate::{
 
 use anyhow::{Context, Result};
 use async_raft::{async_trait::async_trait, network::RaftNetwork, raft::*, NodeId};
-use futures::stream::{futures_unordered::FuturesUnordered, StreamExt};
 use rand::prelude::*;
 use std::{collections::HashMap, convert::TryInto, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -17,13 +16,6 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tokio_tls::TlsConnection;
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum PeerTrackerResponse {
-    Ok,
-    ManagerManagerResponse(ManagerManagerResponse),
-}
-use PeerTrackerResponse as Response;
 
 #[derive(Debug)]
 pub enum PeerTrackerRequest {

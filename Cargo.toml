@@ -25,7 +25,7 @@ tracing-opentelemetry = "0.12.0"
 # Async
 futures = "0.3.16"
 rustls = "0.19.1"
-tokio = { version = "1.5.0", features = ["full"] }
+tokio = { version = "1.12.0", features = ["full"] }
 
 # Networking
 webpki = "0.21.0"
@@ -45,11 +45,6 @@ indradb-lib = { version = "2.1.0", features = ["rocksdb-datastore"] }
 chrono = "0.4.19"
 rand = "0.8.4"
 uuid = "0.8.2"
-
-[dependencies.common_model]
-path = "../common_model/"
-default-features = false
-features = ["instance_manager"]
 
 [dev-dependencies]
 tempdir = "0.3.7"
